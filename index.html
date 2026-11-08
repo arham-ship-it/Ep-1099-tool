@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>EP 1099 Tool</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@600;700;800&family=Poppins:wght@400;500;600&display=swap">
+  <!-- Google Identity Services: used only for "Read W-9s from Drive" -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="mark">
+      <svg class="logo-svg" width="34" height="35" viewBox="0 0 39 40" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Enduring Planet Logo">
+        <path fill-rule="evenodd" clip-rule="evenodd" d="M14.8191 3.21039C14.009 10.5704 14.0637 18.6298 14.2302 26.7065C14.265 28.4329 14.3954 30.1594 14.525 31.8738C14.5421 32.1004 14.5592 32.3267 14.5761 32.5528C14.7031 34.2902 14.3572 34.6182 12.7237 34.2511C5.99079 32.7418 1.16498 27.1604 0.0636213 21.3358C-0.188179 20.0002 0.300095 19.5115 1.65982 19.6657C4.25227 19.9553 6.84254 20.2622 9.43061 20.5865C11.0772 20.7928 11.2217 20.6473 11.1648 18.9642L11.1581 18.7681C11.1033 17.1534 11.0497 15.5749 11.1275 13.9822C11.2107 12.2926 11.0465 12.082 9.32551 12.399C6.86589 12.8522 4.40846 13.309 1.95322 13.7694C1.77507 13.8022 1.59526 13.8254 1.41459 13.8389C0.400815 13.9019 0.216892 13.6847 0.525621 12.7313C1.29416 10.3641 2.41741 8.18151 4.16031 6.37896C6.6192 3.83802 9.47221 1.90734 12.9339 0.966975C14.8783 0.441412 15.0096 0.543481 14.8191 3.21039ZM36.8506 10.6226C38.1841 13.27 38.6548 16.1041 38.5191 19.0121C38.1928 26.0268 35.2741 31.7711 29.6732 36.0516C27.2077 37.9345 24.4182 39.2832 21.2937 39.6806C20.0675 39.837 19.7238 39.4852 19.761 38.219C19.8559 34.3866 19.9851 30.5542 20.1485 26.7218C20.2208 25.0995 21.609 24.1157 23.7219 23.9246C28.7229 23.4598 32.5722 21.1274 35.088 16.7578C36.1675 14.8576 36.6667 12.7944 36.8506 10.6226ZM22.8089 1.31443C20.6609 0.443556 20.5033 0.606431 20.639 2.86288C20.7156 4.81376 20.7987 6.76513 20.8819 8.71674C20.9772 10.9538 21.0726 13.1912 21.158 15.4286C21.1755 16.1974 21.5017 16.61 22.2528 16.5753C23.4086 16.5534 24.5616 16.4525 25.7035 16.2734C27.2472 15.9824 28.2084 14.9812 28.3945 13.4045C28.8456 9.5714 27.9435 6.0662 25.4802 3.08005C24.8277 2.28953 23.7855 1.70968 22.8089 1.31443Z" fill="url(#ep_brand_grad)"/>
+        <defs>
+          <linearGradient id="ep_brand_grad" x1="-4.05" y1="22.2" x2="35.39" y2="7.67" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#02CFA1"/>
+            <stop offset="1" stop-color="#00D9A6"/>
+          </linearGradient>
+        </defs>
+      </svg>
+      <div>
+        <div class="brand-title"><b>Enduring Planet</b> <span class="badge-tool">1099 Tool</span></div>
+        <span class="brand-sub">Vendor eligibility · W-9 tracker</span>
+      </div>
+    </div>
+    <div class="grow"></div>
+    <span class="save" id="saveState">Saved on this computer</span>
+    <button class="tbtn" id="btnRules" type="button">IRS rules</button>
+    <button class="tbtn internal" id="btnSettings" type="button">Settings</button>
+  </header>
+
+  <div class="shell" id="shell">
+    <aside class="rail internal">
+      <button class="primary" id="btnUploadGl" type="button">Upload general ledger</button>
+      <h3>Company trackers</h3>
+      <div class="clist" id="clist"></div>
+      <div class="actions"><button class="ghost" id="btnBackup" type="button">Back up data</button><button class="ghost" id="btnRestore" type="button">Restore</button></div>
+      <p class="note">Trackers are saved in this browser. Back up regularly, or move storage to Firebase (see ANTIGRAVITY_PROMPT.md).</p>
+    </aside>
+    <main id="main"></main>
+  </div>
+
+  <input type="file" id="glFile" accept=".csv,.xlsx,.xls" hidden>
+  <input type="file" id="w9File" accept=".pdf,.png,.jpg,.jpeg,.zip" multiple hidden>
+  <input type="file" id="restoreFile" accept=".json" hidden>
+  <div id="modal"></div>
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

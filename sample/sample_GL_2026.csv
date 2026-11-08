@@ -1,0 +1,19 @@
+Company,Payment Date,Vendor,Vendor ID,GL Account,Account Name,Amount,Payment Method,Memo
+Acme Holdings LLC,2026-01-15,ABC Consulting LLC,V001,6100,Consulting Fees,"$6,000.00",ACH,Jan retainer
+Acme Holdings LLC,2026-04-15,"ABC Consulting, L.L.C.",V001,6100,Consulting Fees,"$8,200.00",Check,Q2 project
+Acme Holdings LLC,2026-03-01,Brightline Corp,V002,6100,Consulting Fees,"$12,000.00",ACH,Strategy work
+Acme Holdings LLC,2026-02-10,Smith & Partners Law,V003,6300,Legal Fees,"$4,500.00",Check,Contract review
+Acme Holdings LLC,2026-01-01,Main Street Properties,V004,6200,Office Rent,"$3,000.00",ACH,Jan rent
+Acme Holdings LLC,2026-02-01,Main Street Properties,V004,6200,Office Rent,"$3,000.00",ACH,Feb rent
+Acme Holdings LLC,2026-05-05,Jane Doe Design,V005,6150,Design Services,"$1,999.00",Check,Logo
+Acme Holdings LLC,2026-06-05,QuickPrint Inc,V006,5000,Cost of Goods Sold,"$25,000.00",ACH,Inventory
+Acme Holdings LLC,2026-07-20,Cloud Freelancer,V007,6100,Consulting Fees,"$5,000.00",Credit Card,Paid on card
+Acme Holdings LLC,2026-08-12,Northwind Services,V008,6900,Miscellaneous Expense,"$3,500.00",Check,Unknown
+Acme Holdings LLC,2026-09-01,Global Dev Ltd,V009,6100,Consulting Fees,"$7,000.00",Wire,Offshore dev
+Acme Holdings LLC,2025-12-20,ABC Consulting LLC,V001,6100,Consulting Fees,"$9,000.00",Check,Prior year
+Acme Holdings LLC,2026-10-01,Dr. Lee Clinic PC,V010,6400,Medical Services,"$2,500.00",Check,Employee physicals
+Beta Retail Inc,2026-03-03,ABC Consulting LLC,V101,7100,Professional Services,"$2,400.00",ACH,Beta project
+Beta Retail Inc,2026-04-04,Sunrise Royalties LLC,V102,7500,Royalty Expense,$50.00,Check,Q1 royalty
+Beta Retail Inc,2026-05-05,Fast Freight Co,V103,7600,Freight Out,"$9,000.00",ACH,Shipping
+Beta Retail Inc,2026-06-06,Mike's Repair,V104,7200,Repairs and Maintenance,"(500.00)",Check,Refund
+Beta Retail Inc,2026-06-01,Mike's Repair,V104,7200,Repairs and Maintenance,"$2,300.00",Check,HVAC repair
