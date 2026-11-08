@@ -3,7 +3,7 @@ import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import {
   RULES, RULES_VERIFIED, CATS, ENTITIES, S, FIELD_LABELS, latestYear, rulesFor, normalizeVendor, fieldKey, slug, cidFor, r2, money,
-  mapHeaders, listAccounts, aggregate, evaluate, w9State, stats, matchByName, suggestCategory
+  mapHeaders, prepareSheet, listAccounts, aggregate, evaluate, w9State, stats, matchByName, suggestCategory
 } from './logic.js';
 import { Store } from './store.js';
 import { readW9, listDriveFiles, downloadDriveFile, sendToSheet, sheetLinks } from './integrations.js';
@@ -179,10 +179,9 @@ async function readGl(file) {
   } catch (err) { toast('Couldn’t read that file: ' + err.message); }
 }
 function startImport(aoa, name) {
-  let h = 0; while (h < aoa.length && aoa[h].filter(x => String(x).trim()).length < 3) h++;
-  if (h >= aoa.length) { toast('No header row found in that file.'); return; }
-  const headers = aoa[h].map(x => String(x).trim());
-  imp = { name, headers, rows: aoa.slice(h + 1).filter(r => r.some(x => String(x).trim())), idx: mapHeaders(headers), taxYear: latestYear(), defaultCo: '', step: 1 };
+  const p = prepareSheet(aoa);
+  if (!p) { toast('No header row found in that file.'); return; }
+  imp = { name, headers: p.headers, rows: p.rows, idx: mapHeaders(p.headers), taxYear: latestYear(), defaultCo: p.companyHint, grouped: p.grouped, step: 1 };
   renderImport();
 }
 function renderImport() {
@@ -191,6 +190,7 @@ function renderImport() {
   if (imp.step === 1) {
     const opt = k => `<select id="m_${k}"><option value="">— not in file —</option>${imp.headers.map((h, i) => `<option value="${i}" ${imp.idx[k] === i ? 'selected' : ''}>${esc(h)}</option>`).join('')}</select>`;
     body = `<p class="note"><b>${esc(imp.name)}</b> · ${imp.rows.length.toLocaleString()} lines. Check that each field points at the right column.</p>
+      ${imp.grouped ? '<p class="okbox">Report-style ledger detected (QuickBooks/Xero): account headings were copied onto each transaction as "Account Name", and Total / Beginning Balance rows were skipped.</p>' : ''}
       <div class="grid2">${Object.keys(FIELD_LABELS).map(k => `<label class="field">${FIELD_LABELS[k]}${k === 'vendor' ? ' *' : ''}${opt(k)}</label>`).join('')}
       <label class="field">Tax year<select id="m_year">${Object.keys(RULES).map(y => `<option ${+y === imp.taxYear ? 'selected' : ''}>${y}</option>`).join('')}<option>${latestYear() + 1}</option></select></label>
       <label class="field">Company name (if no Company column)<input id="m_co" value="${esc(imp.defaultCo)}" placeholder="e.g. Acme Holdings LLC"></label></div>

@@ -77,6 +77,7 @@ export function suggestCategory(name) {
   if (/\brent|lease/.test(n)) return 'Rent';
   if (/medical|health ?care|clinic|physician|doctor/.test(n)) return 'Medical';
   if (/prize|award/.test(n)) return 'Other Income';
+  if (/payable|receivable|checking|savings|\bbank\b|undeposited|clearing|sales\b|revenue|income|equity|retained|capital|loan|note payable|accrued|deferred|prepaid|credit card|owner|draw|distribution|opening balance|fixed asset|accumulated|^\d*\s*(cash|petty cash)\b/.test(n)) return 'Not Reportable';
   if (/cogs|cost of goods|inventory|freight|shipping|postage|utilit|electric|telephone|phone|internet|payroll|wage|salar|benefit|travel|meal|airfare|hotel|software|subscription|saas|bank|merchant|interest|insurance|tax|depreciation|amortization|supplies|materials|equipment purchase|reimburse/.test(n)) return 'Not Reportable';
   if (/consult|contract|professional|freelanc|service|labor|commission|subcontract|design|accounting|bookkeep|audit fee|repair|maintenance|cleaning|janitor|security guard|landscap|it support|marketing|advertising agency|staffing|temp/.test(n)) return 'Services';
   return '';
@@ -90,10 +91,52 @@ export const ALIASES = {
   accountName: ['account name', 'account description', 'gl account name', 'account title'],
   amount: ['amount', 'net amount', 'paid amount', 'payment amount'],
   debit: ['debit'], credit: ['credit'],
-  method: ['payment method', 'method', 'pay method', 'payment type', 'payment mode']
+  method: ['payment method', 'method', 'pay method', 'payment type', 'payment mode', 'split', 'payment account']
 };
 export const FIELD_LABELS = { company: 'Company', date: 'Payment date', vendor: 'Vendor', account: 'GL account', accountName: 'Account name',
   amount: 'Amount', debit: 'Debit', credit: 'Credit', method: 'Payment method' };
+
+/**
+ * Turns a raw sheet (array of rows) into {headers, rows, companyHint}.
+ * Handles report-style exports (QuickBooks / Xero "General Ledger", "Transaction Detail by Account")
+ * where the account is a heading row above its transactions instead of a column:
+ *   "6100 Consulting Fees"            <- account heading row
+ *        01/15/2026  Expense  ABC LLC  ...  6,000.00
+ *   "Total for 6100 Consulting Fees"  <- skipped
+ * The account is copied down into a new "Account (from report)" column.
+ */
+export function prepareSheet(aoa) {
+  const filled = r => r.filter(x => String(x ?? '').trim() !== '').length;
+  let h = 0; while (h < aoa.length && filled(aoa[h]) < 3) h++;
+  if (h >= aoa.length) return null;
+  const titleRows = aoa.slice(0, h).map(r => r.find(x => String(x ?? '').trim())).filter(Boolean).map(String);
+  const companyHint = titleRows.find(t => !/general ledger|transaction|report|detail|basis|^\w+ \d{1,2}(,|\s)|\d{4}\s*-|through/i.test(t)) || '';
+  let headers = aoa[h].map(x => String(x ?? '').trim());
+  let rows = aoa.slice(h + 1).filter(r => filled(r));
+  const idx = mapHeaders(headers);
+  if (idx.account !== undefined || idx.accountName !== undefined) return { headers, rows, companyHint, grouped: false };
+
+  const dateCol = idx.date, amtCol = idx.amount ?? idx.debit, vendCol = idx.vendor;
+  const firstText = r => { const i = r.findIndex(x => String(x ?? '').trim() !== ''); return i < 0 ? null : { i, t: String(r[i]).trim() }; };
+  const isHeading = r => {
+    const f = firstText(r); if (!f) return false;
+    const hasDate = dateCol !== undefined && String(r[dateCol] ?? '').trim() !== '';
+    const hasVendor = vendCol !== undefined && vendCol !== f.i && String(r[vendCol] ?? '').trim() !== '';
+    return !hasDate && !hasVendor && f.i <= Math.max(0, (dateCol ?? 1) - 0) && !/^total\b/i.test(f.t);
+  };
+  if (!rows.some(isHeading)) return { headers, rows, companyHint, grouped: false };
+
+  let acct = ''; const out = [];
+  for (const r of rows) {
+    const f = firstText(r); if (!f) continue;
+    if (/^total\b/i.test(f.t) || /^(beginning|opening|ending) balance/i.test(f.t)) continue;
+    if (isHeading(r)) { acct = f.t.replace(/\s*\(\d+\)\s*$/, ''); continue; }
+    if (amtCol !== undefined && String(r[amtCol] ?? '').trim() === '' && (idx.credit === undefined || String(r[idx.credit] ?? '').trim() === '')) continue;
+    out.push([...r, acct]);
+  }
+  headers = [...headers, 'Account Name'];
+  return { headers, rows: out, companyHint, grouped: true };
+}
 
 export function mapHeaders(headers) {
   const h = headers.map(x => String(x).trim().toLowerCase()); const idx = {}; const used = new Set();
