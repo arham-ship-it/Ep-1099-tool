@@ -523,7 +523,7 @@ $('btnSettings').onclick = () => {
   md.querySelector('#eClose').onclick = closeModal;
   md.querySelector('#eSave').onclick = () => {
     const u = md.querySelector('#eUrl').value.trim();
-    if (u && !/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec/.test(u)) return toast('The web app URL should end in /exec.');
+    if (u && !/^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s\/[^/]+\/exec/.test(u)) return toast('The web app URL should end in /exec.');
     Store.putSettings({ sheetUrl: u, sheetKey: md.querySelector('#eKey').value.trim(), googleClientId: md.querySelector('#eCid').value.trim(),
       geminiKey: md.querySelector('#eGk').value.trim(), geminiModel: md.querySelector('#eGm').value.trim() });
     closeModal(); toast('Settings saved');
