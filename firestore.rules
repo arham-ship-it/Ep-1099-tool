@@ -1,0 +1,38 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper function: verifies user is authenticated with an official @enduringplanet.com Google account
+    function isEnduringPlanet() {
+      return request.auth != null &&
+             request.auth.token.email.matches('.*@enduringplanet[.]com$') &&
+             request.auth.token.email_verified == true;
+    }
+
+    // Client companies tracker data
+    match /clients/{cid} {
+      allow read, write: if isEnduringPlanet();
+    }
+
+    // Vendors per client company (one document per company keyed by cid)
+    match /vendors/{cid} {
+      allow read, write: if isEnduringPlanet();
+    }
+
+    // Shared team-wide settings (Google Sheet URL, App Key, Google OAuth Client ID)
+    match /settings/{docId} {
+      allow read, write: if isEnduringPlanet();
+    }
+
+    // Team members directory (for assignment dropdown)
+    match /users/{uid} {
+      allow read, write: if isEnduringPlanet();
+    }
+
+    // Default deny all other documents
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

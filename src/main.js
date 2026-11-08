@@ -6,11 +6,12 @@ import {
   mapHeaders, prepareSheet, listAccounts, aggregate, evaluate, w9State, stats, matchByName, suggestCategory
 } from './logic.js';
 import { Store } from './store.js';
+import { loginWithGoogle, logoutUser } from './firebase.js';
 import { readW9, listDriveFiles, downloadDriveFile, sendToSheet, sheetLinks } from './integrations.js';
 import SAMPLE_GL from '../sample/sample_GL_2026.csv?raw';
 
 const SCLASS = { 'Eligible': 's-elig', 'Needs W-9': 's-w9', 'Needs review': 's-rev', 'Not eligible': 's-not' };
-const state = { cid: null, filter: 'all', q: '', clientView: false };
+const state = { cid: null, filter: 'all', q: '', clientView: false, teamScope: 'all' };
 const $ = id => document.getElementById(id);
 
 /* ------------------------------- helpers ------------------------------- */
@@ -34,20 +35,122 @@ const sortedClientIds = () => Object.keys(Store.clients()).sort((a, b) => Store.
 const segBar = st => { const sc = Math.max(st.scope, 1);
   return `<div class="bar" role="img" aria-label="${st.rec} of ${st.scope} W-9s received"><i style="width:${st.rec / sc * 100}%;background:var(--ok)"></i><i style="width:${st.trk / sc * 100}%;background:var(--info)"></i><i style="width:${st.req / sc * 100}%;background:var(--bad)"></i></div>`; };
 
+/* --------------------------------- auth UI --------------------------------- */
+function renderAuth(user) {
+  const uSec = $('userSection');
+  const authOverlay = $('authOverlay');
+
+  if (user) {
+    if (authOverlay) authOverlay.hidden = true;
+    if (uSec) {
+      uSec.innerHTML = `
+        <div class="user-pill">
+          ${user.photoURL ? `<img class="user-avatar" src="${esc(user.photoURL)}" alt="" onerror="this.style.display='none'">` : ''}
+          <span class="user-name" title="${esc(user.email)}">${esc(user.name || user.email.split('@')[0])}</span>
+          <button class="tbtn tbtn-signout" id="btnSignOut" type="button">Sign out</button>
+        </div>`;
+      const btnOut = $('btnSignOut');
+      if (btnOut) btnOut.onclick = () => logoutUser();
+    }
+  } else if (Store.isConfigured()) {
+    if (uSec) uSec.innerHTML = `<button class="primary" id="btnHeaderSignIn" type="button" style="padding:4px 10px;font-size:12px">Sign in</button>`;
+    const btnIn = $('btnHeaderSignIn');
+    if (btnIn) btnIn.onclick = () => showSignInModal();
+
+    if (authOverlay) {
+      authOverlay.hidden = false;
+      showSignInModal();
+    }
+  } else {
+    // Local fallback mode when Firebase keys aren't added to .env yet
+    if (uSec) uSec.innerHTML = `<span class="badge-tool" title="Add VITE_FIREBASE_* in .env to enable team Firebase">Local mode</span>`;
+    if (authOverlay) authOverlay.hidden = true;
+  }
+}
+
+function showSignInModal(errorMsg = '') {
+  const authOverlay = $('authOverlay');
+  if (!authOverlay) return;
+  authOverlay.hidden = false;
+  authOverlay.innerHTML = `
+    <div class="auth-card">
+      <svg class="logo-svg" viewBox="0 0 39 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path fill-rule="evenodd" clip-rule="evenodd" d="M14.8191 3.21039C14.009 10.5704 14.0637 18.6298 14.2302 26.7065C14.265 28.4329 14.3954 30.1594 14.525 31.8738C14.5421 32.1004 14.5592 32.3267 14.5761 32.5528C14.7031 34.2902 14.3572 34.6182 12.7237 34.2511C5.99079 32.7418 1.16498 27.1604 0.0636213 21.3358C-0.188179 20.0002 0.300095 19.5115 1.65982 19.6657C4.25227 19.9553 6.84254 20.2622 9.43061 20.5865C11.0772 20.7928 11.2217 20.6473 11.1648 18.9642L11.1581 18.7681C11.1033 17.1534 11.0497 15.5749 11.1275 13.9822C11.2107 12.2926 11.0465 12.082 9.32551 12.399C6.86589 12.8522 4.40846 13.309 1.95322 13.7694C1.77507 13.8022 1.59526 13.8254 1.41459 13.8389C0.400815 13.9019 0.216892 13.6847 0.525621 12.7313C1.29416 10.3641 2.41741 8.18151 4.16031 6.37896C6.6192 3.83802 9.47221 1.90734 12.9339 0.966975C14.8783 0.441412 15.0096 0.543481 14.8191 3.21039ZM36.8506 10.6226C38.1841 13.27 38.6548 16.1041 38.5191 19.0121C38.1928 26.0268 35.2741 31.7711 29.6732 36.0516C27.2077 37.9345 24.4182 39.2832 21.2937 39.6806C20.0675 39.837 19.7238 39.4852 19.761 38.219C19.8559 34.3866 19.9851 30.5542 20.1485 26.7218C20.2208 25.0995 21.609 24.1157 23.7219 23.9246C28.7229 23.4598 32.5722 21.1274 35.088 16.7578C36.1675 14.8576 36.6667 12.7944 36.8506 10.6226ZM22.8089 1.31443C20.6609 0.443556 20.5033 0.606431 20.639 2.86288C20.7156 4.81376 20.7987 6.76513 20.8819 8.71674C20.9772 10.9538 21.0726 13.1912 21.158 15.4286C21.1755 16.1974 21.5017 16.61 22.2528 16.5753C23.4086 16.5534 24.5616 16.4525 25.7035 16.2734C27.2472 15.9824 28.2084 14.9812 28.3945 13.4045C28.8456 9.5714 27.9435 6.0662 25.4802 3.08005C24.8277 2.28953 23.7855 1.70968 22.8089 1.31443Z" fill="url(#ep_auth_grad)"/>
+        <defs>
+          <linearGradient id="ep_auth_grad" x1="-4.05" y1="22.2" x2="35.39" y2="7.67" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#02CFA1"/>
+            <stop offset="1" stop-color="#00D9A6"/>
+          </linearGradient>
+        </defs>
+      </svg>
+      <h2>Team Sign-in</h2>
+      <p>Sign in with your <b>@enduringplanet.com</b> Google Workspace account to access and collaborate on company 1099 trackers.</p>
+      ${errorMsg ? `<div class="auth-error">${esc(errorMsg)}</div>` : ''}
+      <button type="button" class="auth-google-btn" id="btnGoogleLogin">
+        <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.616z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z"/><path fill="#FBBC05" d="M3.964 10.707c-.18-.54-.282-1.117-.282-1.707s.102-1.167.282-1.707V4.961H.957C.347 6.173 0 7.548 0 9s.347 2.827.957 4.039l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.961L3.964 7.293C4.672 5.166 6.656 3.58 9 3.58z"/></svg>
+        Sign in with Google
+      </button>
+      <p class="domain-note">Access is strictly restricted to @enduringplanet.com domains.</p>
+    </div>`;
+
+  const btn = $('btnGoogleLogin');
+  if (btn) {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = 'Signing in…';
+      try {
+        await loginWithGoogle();
+      } catch (err) {
+        showSignInModal(err.message || 'Failed to sign in with Google');
+      }
+    };
+  }
+}
+
 /* --------------------------------- rail --------------------------------- */
 function renderRail() {
-  const ids = sortedClientIds();
+  let ids = sortedClientIds();
+  if (state.teamScope === 'my') {
+    const myEmail = (Store.currentUser()?.email || '').toLowerCase();
+    ids = ids.filter(id => {
+      const c = Store.clients()[id];
+      return c && c.assignedTo && c.assignedTo.toLowerCase() === myEmail;
+    });
+  }
+
   $('clist').innerHTML = ids.length ? ids.map(id => {
     const c = Store.clients()[id];
     const s = stats(vendorList(id), rulesFor(c.taxYear));
     const pct = s.scope ? Math.round(s.rec / s.scope * 100) : 0;
+    const assigneeText = c.assignedToName || c.assignedTo;
+    const assigneeBadge = assigneeText
+      ? `<span class="c-assignee">👤 ${esc(assigneeText)}</span>`
+      : `<span class="c-assignee unassigned">Unassigned</span>`;
     return `<button class="citem" type="button" data-cid="${id}" aria-current="${id === state.cid}">
       <span class="cn">${esc(c.name)}</span>
-      <span class="cm"><span>${s.scope} need 1099 · ${s.req} to request</span><span class="num">${pct}%</span></span>${segBar(s)}</button>`;
-  }).join('') : '<p class="note">No company trackers yet. Upload a GL to create one per company.</p>';
+      <span class="cm"><span>${s.scope} need 1099 · ${s.req} to request</span><span class="num">${pct}%</span></span>
+      ${assigneeBadge}
+      ${segBar(s)}</button>`;
+  }).join('') : (state.teamScope === 'my'
+    ? '<p class="note">No clients assigned to you yet. Switch to "All clients" to pick a company and assign it.</p>'
+    : '<p class="note">No company trackers yet. Upload a GL to create one per company.</p>');
+
   $('clist').querySelectorAll('.citem').forEach(b => b.onclick = () => select(b.dataset.cid));
+
+  const teamTabs = $('teamTabs');
+  if (teamTabs) {
+    teamTabs.querySelectorAll('.team-tab').forEach(b => {
+      b.classList.toggle('active', b.dataset.scope === state.teamScope);
+      b.onclick = () => {
+        state.teamScope = b.dataset.scope;
+        renderRail();
+      };
+    });
+  }
 }
+
 function select(cid) { state.cid = cid; state.filter = 'all'; state.q = ''; try { localStorage.setItem('ep1099.cid', cid); } catch { } render(); }
+
 function render() {
   if (!state.cid || !Store.clients()[state.cid]) {
     let saved = null; try { saved = localStorage.getItem('ep1099.cid'); } catch { }
@@ -76,12 +179,19 @@ function renderMain() {
   if (state.q) { const q = state.q.toLowerCase(); rows = rows.filter(v => v.n.toLowerCase().includes(q)); }
   const cv = state.clientView; document.body.classList.toggle('clientview', cv);
   const chip = (k, l, n) => `<button type="button" class="chip" data-f="${k}" aria-pressed="${f === k}">${l} <span class="num">${n}</span></button>`;
+
   m.innerHTML = `
   <section class="card"><div class="chead">
     <div style="min-width:0"><h1>${esc(c.name)}</h1>
       <div class="meta"><span>Tax year <b>${c.taxYear}</b></span><span>${c.glFile ? 'GL: ' + esc(c.glFile) + ' · imported ' + esc(fmtDate(c.importedAt)) : ''}</span>
         ${c.driveUrl ? `<a href="${esc(c.driveUrl)}" target="_blank" rel="noopener">Open client W-9 folder</a>` : ''}</div>
       <div class="meta internal">
+        <label>Assigned to
+          <select id="cAssigned">
+            <option value="">— Unassigned —</option>
+            ${Store.teamUsers().map(u => `<option value="${esc(u.email)}" data-name="${esc(u.name || u.email)}" ${c.assignedTo === u.email ? 'selected' : ''}>${esc(u.name ? `${u.name} (${u.email})` : u.email)}</option>`).join('')}
+          </select>
+        </label>
         <label>W-9 Drive folder <input id="cDrive" value="${esc(c.driveUrl || '')}" placeholder="Paste Drive folder link (view-only is fine)"></label>
         <label>Sender name <input id="cSName" value="${esc(c.senderName || '')}" placeholder="Who sends the emails"></label>
         <label>Sender email <input id="cSEmail" value="${esc(c.senderEmail || '')}" placeholder="name@company.com"></label>
@@ -117,6 +227,7 @@ function renderMain() {
   </section>`;
   bindMain(c, vs);
 }
+
 function rowHtml(v) {
   const ev = v.ev;
   let w;
@@ -136,6 +247,7 @@ function rowHtml(v) {
     <td class="internal" style="min-width:190px"><input data-cn="${v.fk}" placeholder="Contact name" value="${esc(v.cn || '')}" aria-label="Contact name"><input data-ce="${v.fk}" placeholder="email@vendor.com" value="${esc(v.ce || '')}" style="margin-top:4px" aria-label="Contact email"></td>
   </tr>`;
 }
+
 function bindMain(c, vs) {
   const m = $('main'); const cid = state.cid;
   m.querySelectorAll('.chip').forEach(b => b.onclick = () => { state.filter = b.dataset.f; renderMain(); });
@@ -145,6 +257,18 @@ function bindMain(c, vs) {
   m.querySelectorAll('[data-ce]').forEach(i => i.onchange = () => Store.patchVendor(cid, i.dataset.ce, { ce: i.value.trim() }));
   m.querySelectorAll('[data-w9toggle]').forEach(b => b.onclick = () => { const v = Store.vendors(cid)[b.dataset.w9toggle] || {};
     Store.patchVendor(cid, b.dataset.w9toggle, { w9: { ...(v.w9 || {}), on: !(v.w9 && v.w9.on), d: new Date().toISOString(), src: (v.w9 && v.w9.src) || 'manual' } }); });
+
+  const cAssigned = m.querySelector('#cAssigned');
+  if (cAssigned) {
+    cAssigned.onchange = () => {
+      const opt = cAssigned.selectedOptions[0];
+      const email = cAssigned.value;
+      const name = opt ? (opt.dataset.name || email) : '';
+      Store.putClient(cid, { assignedTo: email, assignedToName: name });
+      toast(email ? `Assigned to ${name || email}` : 'Client unassigned');
+    };
+  }
+
   [['cDrive', 'driveUrl'], ['cSName', 'senderName'], ['cSEmail', 'senderEmail']].forEach(([id, f]) => { const el = m.querySelector('#' + id); el.onchange = () => Store.putClient(cid, { [f]: el.value.trim() }); });
   m.querySelector('#aW9').onclick = () => $('w9File').click();
   m.querySelector('#aDrive').onclick = () => readFromDrive(c);
@@ -156,15 +280,18 @@ function bindMain(c, vs) {
     md.querySelector('#cNo').onclick = closeModal; md.querySelector('#cYes').onclick = () => { closeModal(); Store.deleteClient(cid); state.cid = null; toast('Tracker deleted'); };
   };
 }
+
 function emptyHtml() {
   return `<section class="card empty"><h1 style="font-size:26px">Find your 1099 vendors in minutes</h1>
-    <p>Upload a general ledger or AP payment export (.xlsx or .csv). The tool totals payments per vendor, applies the IRS ${latestYear()} rules ($2,000 for 1099-NEC and most 1099-MISC), and builds one color-coded tracker for each company in the file.</p>
-    <div class="drop" id="dropGl" role="button" tabindex="0">Drop a GL file here, or click to choose</div>
-    <div class="actions" style="justify-content:center"><button class="ghost" id="trySample" type="button">Try it with a sample GL</button></div>
-    <p class="note">Next: read W-9s from the client's Drive folder (or upload them), then send vendors that still need a W-9 to your Google Sheet email tracker.</p></section>`;
+    <p class="note" style="max-width:520px;margin:12px auto 24px">Upload a general ledger or AP payment export (.xlsx or .csv). The tool totals payments per vendor, applies the IRS ${latestYear()} rules (${money(RULES[latestYear()]['Nonemployee compensation'].th)} for 1099-NEC and most 1099-MISC), and builds one color-coded tracker for each company in the file.</p>
+    <div class="dropzone" id="emptyDrop" tabindex="0" role="button" aria-label="Drop general ledger file here">Drop a GL file here, or click to choose</div>
+    <div style="margin-top:20px"><button class="ghost" id="trySample" type="button">Try it with a sample GL</button></div>
+    <p class="note" style="margin-top:28px">Next: read W-9s from the client’s Drive folder (or upload them), then send vendors that still need a W-9 to your Google Sheet email tracker.</p></section>`;
 }
+
 function bindEmpty() {
-  const d = $('dropGl'); d.onclick = () => $('glFile').click();
+  const d = $('emptyDrop'); if (!d) return;
+  d.onclick = () => $('glFile').click();
   d.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); d.click(); } };
   dropZone(d, files => files[0] && readGl(files[0]));
   $('trySample').onclick = () => { const wb = XLSX.read(SAMPLE_GL, { type: 'string', cellDates: true }); startImport(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' }), 'sample_GL_2026.csv'); };
@@ -178,12 +305,14 @@ async function readGl(file) {
     startImport(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' }), file.name);
   } catch (err) { toast('Couldn’t read that file: ' + err.message); }
 }
+
 function startImport(aoa, name) {
   const p = prepareSheet(aoa);
   if (!p) { toast('No header row found in that file.'); return; }
   imp = { name, headers: p.headers, rows: p.rows, idx: mapHeaders(p.headers), taxYear: latestYear(), defaultCo: p.companyHint, grouped: p.grouped, step: 1 };
   renderImport();
 }
+
 function renderImport() {
   const steps = `<div class="steps"><span class="${imp.step === 1 ? 'on' : ''}">1 · Columns</span><span class="${imp.step === 2 ? 'on' : ''}">2 · GL accounts</span><span class="${imp.step === 3 ? 'on' : ''}">3 · Results</span></div>`;
   let body = '';
@@ -208,11 +337,11 @@ function renderImport() {
     const idx = {}; Object.keys(FIELD_LABELS).forEach(k => { const v = md.querySelector('#m_' + k).value; if (v !== '') idx[k] = +v; });
     if (idx.vendor === undefined) return toast('Choose the Vendor column.');
     if (idx.amount === undefined && idx.debit === undefined) return toast('Choose the Amount (or Debit) column.');
-    imp.idx = idx; imp.taxYear = +md.querySelector('#m_year').value; imp.defaultCo = md.querySelector('#m_co').value.trim() || imp.name.replace(/\.[^.]+$/, '');
-    imp.accounts = listAccounts(imp.rows, imp.idx, imp.taxYear, imp.defaultCo);
+    imp.idx = idx; imp.taxYear = +md.querySelector('#m_year').value; imp.defaultCo = md.querySelector('#m_co').value.trim();
+    imp.accounts = listAccounts(imp.rows, imp.idx, imp.defaultCo);
+    const saved = (Store.settings().acctMap || {});
     for (const a of imp.accounts) {
-      const saved = (Store.clients()[cidFor(a.co)] || {}).accountMap || {};
-      const sk = a.acct + '|' + a.an;
+      const sk = `${a.co}::${a.acct}::${a.an}`;
       if (saved[sk]) { a.cat = saved[sk]; a.src = 'Saved mapping'; } else { a.cat = suggestCategory(a.an || a.acct); a.src = a.cat ? 'Suggested — check' : ''; }
     }
     imp.step = 2; renderImport();
@@ -224,27 +353,28 @@ function renderImport() {
   }
   if (imp.step === 3) md.querySelector('#mDone').onclick = () => { closeModal(); if (imp.firstCid) select(imp.firstCid); };
 }
+
 function runImport() {
-  const map = {}; imp.accounts.forEach(a => { if (a.cat) map[a.co + '|' + a.acct + '|' + a.an] = a.cat; });
-  const { cos, skipped } = aggregate(imp.rows, imp.idx, imp.taxYear, imp.defaultCo, map);
+  const amap = {}; imp.accounts.forEach(a => amap[`${a.co}::${a.acct}::${a.an}`] = a.cat);
+  const curMap = { ...(Store.settings().acctMap || {}), ...amap };
+  Store.putSettings({ acctMap: curMap });
+  const { byCompany, skipped } = aggregate(imp.rows, imp.idx, imp.taxYear, imp.defaultCo, amap);
+  const cos = Object.keys(byCompany);
+  if (!cos.length) return toast(`No rows in ${imp.taxYear} found with positive payments.`);
   const lines = []; imp.firstCid = null;
-  for (const co of Object.keys(cos).sort()) {
-    const cid = cidFor(co); imp.firstCid ??= cid;
-    const old = Store.vendors(cid); const out = {};
-    for (const key in cos[co]) {
-      const a = cos[co][key]; const fk = fieldKey(key); const o = old[fk] || {};
-      out[fk] = { n: a.n, k: a.k, t: r2(a.t), x: r2(a.x), c: Object.fromEntries(Object.entries(a.c).map(([k, v]) => [k, r2(v)])), u: r2(a.u), ua: a.ua, nr: a.nr,
-        e: o.e || 'Unknown', cn: o.cn || '', ce: o.ce || '', w9: o.w9 || null, rq: o.rq || null };
+  for (const name of cos) {
+    const cid = cidFor(name);
+    if (!imp.firstCid) imp.firstCid = cid;
+    const curV = Store.vendors(cid);
+    const inc = byCompany[name];
+    const merged = { ...curV };
+    for (const k of Object.keys(inc)) {
+      if (merged[k]) { merged[k] = { ...merged[k], t: inc[k].t, x: inc[k].x, e: merged[k].e || inc[k].e, cn: merged[k].cn || '', ce: merged[k].ce || '' }; }
+      else merged[k] = inc[k];
     }
-    for (const fk in old) if (fk.startsWith('v_') && !out[fk] && old[fk].w9 && old[fk].w9.on) out[fk] = { ...old[fk], t: 0, x: 0, c: {}, u: 0, ua: [], nr: [] };
-    const prev = Store.clients()[cid] || {};
-    const accountMap = { ...(prev.accountMap || {}) };
-    imp.accounts.filter(a => a.co === co && a.cat).forEach(a => accountMap[a.acct + '|' + a.an] = a.cat);
-    Store.putVendors(cid, out);
-    Store.putClient(cid, { name: co, taxYear: imp.taxYear, glFile: imp.name, importedAt: new Date().toISOString(), accountMap,
-      driveUrl: prev.driveUrl || '', senderName: prev.senderName || '', senderEmail: prev.senderEmail || '' });
-    const st = stats(Object.values(out), rulesFor(imp.taxYear));
-    lines.push(`<b>${esc(co)}</b>: ${st.paid} vendors · ${st.scope} need a 1099 · ${st.rev} need review`);
+    Store.putVendors(cid, merged);
+    Store.putClient(cid, { name, taxYear: imp.taxYear, glFile: imp.name, importedAt: new Date().toISOString() });
+    lines.push(`<b>${esc(name)}</b>: ${Object.keys(inc).length} vendors paid in ${imp.taxYear}`);
   }
   imp.summary = lines.join('<br>') + (skipped ? `<br>${skipped} lines outside ${imp.taxYear} were ignored.` : '');
   imp.step = 3; renderImport();
@@ -253,32 +383,69 @@ function runImport() {
 /* ------------------------------- W-9s ------------------------------- */
 let w9q = [];
 async function expandFiles(files) {
-  const list = [];
+  const out = [];
   for (const f of files) {
     if (/\.zip$/i.test(f.name)) {
-      const z = await JSZip.loadAsync(await f.arrayBuffer());
-      for (const name of Object.keys(z.files)) {
-        const zf = z.files[name]; if (zf.dir || !/\.(pdf|png|jpe?g)$/i.test(name)) continue;
-        const base = name.split('/').pop();
-        list.push(new File([await zf.async('blob')], base, { type: /pdf$/i.test(base) ? 'application/pdf' : (/png$/i.test(base) ? 'image/png' : 'image/jpeg') }));
-      }
-    } else list.push(f);
+      try {
+        const zip = await JSZip.loadAsync(await f.arrayBuffer());
+        for (const [p, zf] of Object.entries(zip.files)) {
+          if (zf.dir || !/\.(pdf|png|jpe?g)$/i.test(p)) continue;
+          out.push(new File([await zf.async('blob')], p.split('/').pop(), { type: p.endsWith('.pdf') ? 'application/pdf' : 'image/jpeg' }));
+        }
+      } catch (e) { toast('Couldn’t unzip ' + f.name + ': ' + e.message); }
+    } else out.push(f);
   }
-  return list;
+  return out;
 }
-async function processW9s(files) {
-  if (!files.length) return toast('No PDF or image files found.');
+
+function processW9s(files) {
   const vs = vendorList(state.cid);
-  w9q = files.map(f => ({ f, match: matchByName(f.name.replace(/\.[^.]+$/, ''), vs), x: null, st: 'Waiting' }));
-  renderW9();
+  w9q = files.map(f => {
+    const raw = f.name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ').replace(/\bw9\b/gi, '').trim();
+    const match = matchByName(raw, vs);
+    return { f, name: f.name, st: 'Queued', match, x: null, note: '' };
+  });
+  renderW9(); readQueue();
+}
+
+function renderW9() {
+  const vs = vendorList(state.cid);
+  const rows = w9q.map((it, i) => `<tr>
+    <td><b>${esc(it.name)}</b>${it.note ? `<div class="sub">${esc(it.note)}</div>` : ''}</td>
+    <td><select data-wi="${i}"><option value="">— choose vendor —</option>${vs.map(v => `<option value="${v.fk}" ${it.match === v.fk ? 'selected' : ''}>${esc(v.n)}</option>`).join('')}</select></td>
+    <td>${it.x ? `<span class="pill s-elig">${esc(it.x.tax_classification || 'Read')}</span> ${it.x.tin_last4 ? `TIN •••${esc(it.x.tin_last4)}` : ''}` : esc(it.st)}</td>
+  </tr>`).join('');
+  const md = modal(`<div class="phead"><h2>Match W-9 files (${w9q.length})</h2><button class="ghost" id="wClose" type="button">Close</button></div>
+    <p class="note">Each file is matched to a vendor by name. Change the dropdown if the match looks wrong. Never stores full SSN/EIN — only last 4 digits.</p>
+    <div class="tablewrap" style="max-height:55vh;overflow:auto"><table style="min-width:580px"><thead><tr><th>File</th><th>Vendor</th><th>Extracted</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="pfoot"><button class="ghost" id="wCancel" type="button">Cancel</button><button class="primary" id="wSave" type="button">Apply to tracker</button></div>`, 'Match W-9s');
+  md.querySelector('#wClose').onclick = closeModal;
+  md.querySelector('#wCancel').onclick = closeModal;
+  md.querySelectorAll('[data-wi]').forEach(s => s.onchange = () => w9q[+s.dataset.wi].match = s.value);
+  md.querySelector('#wSave').onclick = () => {
+    const cid = state.cid; let applied = 0;
+    for (const it of w9q) {
+      if (!it.match) continue;
+      const patch = { w9: { on: true, f: it.name, d: new Date().toISOString(), src: it.x ? 'ai' : 'filename', l4: it.x && it.x.tin_last4, ln: it.x && it.x.legal_name } };
+      if (it.x && it.x.tax_classification && ENTITIES.includes(it.x.tax_classification)) patch.e = it.x.tax_classification;
+      Store.patchVendor(cid, it.match, patch); applied++;
+    }
+    closeModal(); toast(`Saved W-9 on ${applied} vendor(s)`);
+  };
+}
+
+async function readQueue() {
+  const vs = vendorList(state.cid);
   for (const it of w9q) {
     it.st = 'Reading…'; renderW9();
     const r = await readW9(it.f, Store.settings());
     it.x = r.x; it.note = r.note;
     if (!it.match && it.x) it.match = matchByName(it.x.legal_name || '', vs) || matchByName(it.x.business_name || '', vs);
-    it.st = 'Ready'; renderW9();
+    it.st = it.x ? 'Done' : (it.note || 'Done');
+    renderW9();
   }
 }
+
 async function readFromDrive(c) {
   if (!c.driveUrl) return toast('Paste the client’s W-9 Drive folder link first.');
   const s = Store.settings();
@@ -286,40 +453,18 @@ async function readFromDrive(c) {
   try {
     toast('Signing in to Google…');
     const files = await listDriveFiles(c.driveUrl, s.googleClientId);
-    if (!files.length) return toast('No PDF or image files in that folder.');
-    toast(`Downloading ${files.length} files…`);
-    const out = [];
-    for (const f of files) out.push(await downloadDriveFile(f, s.googleClientId));
-    processW9s(out);
-  } catch (e) { toast(e.message); }
-}
-function renderW9() {
-  const vs = vendorList(state.cid).sort((a, b) => a.n.localeCompare(b.n));
-  const ready = w9q.every(i => i.st === 'Ready');
-  const md = modal(`<div class="phead"><h2>W-9s for ${esc(Store.clients()[state.cid].name)}</h2><button class="ghost" id="wClose" type="button">Close</button></div>
-    <p class="note">Each file is matched to a vendor by file name, then by the name on the form. Check the match and entity type, then save. Only the last 4 digits of the TIN are kept.</p>
-    <div class="tablewrap" style="max-height:60vh;overflow:auto"><table style="min-width:760px"><thead><tr><th>File</th><th>Read from form</th><th>Vendor</th><th>Entity type</th></tr></thead><tbody>
-    ${w9q.map((it, i) => `<tr><td>${esc(it.f.name)}<div class="sub">${it.st}</div></td>
-      <td class="reason">${it.x ? `${esc(it.x.legal_name || '')}${it.x.business_name ? ' / ' + esc(it.x.business_name) : ''}${it.x.tin_last4 ? '<br>TIN •••' + esc(it.x.tin_last4) : ''}${it.x.from ? `<br><span class="sub">via ${esc(it.x.from)}</span>` : ''}${it.x.is_w9 === false ? '<br><b>This may not be a W-9.</b>' : ''}` : esc(it.note || '—')}</td>
-      <td><select data-wm="${i}" aria-label="Vendor"><option value="">— skip this file —</option>${vs.map(v => `<option value="${v.fk}" ${it.match === v.fk ? 'selected' : ''}>${esc(v.n)}</option>`).join('')}</select></td>
-      <td><select data-we="${i}" aria-label="Entity">${ENTITIES.map(e => `<option ${((it.x && it.x.entity_type) || 'Unknown') === e ? 'selected' : ''}>${e}</option>`).join('')}</select></td></tr>`).join('')}
-    </tbody></table></div>
-    <div class="pfoot"><button class="primary" id="wSave" type="button" ${ready ? '' : 'disabled'}>${ready ? 'Save W-9s' : 'Reading files…'}</button></div>`, 'Upload W-9s');
-  md.querySelector('#wClose').onclick = closeModal;
-  md.querySelectorAll('[data-wm]').forEach(s => s.onchange = () => w9q[+s.dataset.wm].match = s.value);
-  md.querySelectorAll('[data-we]').forEach(s => s.onchange = () => { const it = w9q[+s.dataset.we]; it.x = { ...(it.x || {}), entity_type: s.value }; });
-  md.querySelector('#wSave').onclick = () => {
-    let n = 0;
-    for (const it of w9q) {
-      if (!it.match) continue; const x = it.x || {};
-      Store.patchVendor(state.cid, it.match, { e: x.entity_type || 'Unknown', w9: { on: true, f: it.f.name, d: new Date().toISOString(), ln: x.legal_name || '', l4: String(x.tin_last4 || '').slice(-4), src: 'upload' } });
-      n++;
+    if (!files.length) return toast('No PDF or image files found in that Drive folder.');
+    toast(`Found ${files.length} file(s). Downloading…`);
+    const blobs = [];
+    for (const df of files) {
+      const b = await downloadDriveFile(df.id);
+      blobs.push(new File([b], df.name, { type: df.mimeType }));
     }
-    closeModal(); toast(`${n} W-9${n === 1 ? '' : 's'} saved`);
-  };
+    processW9s(blobs);
+  } catch (err) { toast('Drive error: ' + err.message); }
 }
 
-/* --------------------------- email tracker --------------------------- */
+/* ------------------------------- email tracker ------------------------------- */
 function openSend(c, vs) {
   const rows = vs.filter(v => v.w === 'req');
   const s = Store.settings();
@@ -330,30 +475,26 @@ function openSend(c, vs) {
   if (!s.sheetUrl) action = '<p class="warnbox">Connect your Google Sheet email tracker first (Settings, top right).</p>';
   else if (!rows.length) action = '<p class="okbox">Nothing to send — every vendor that needs a 1099 has a W-9 or is already in the tracker.</p>';
   else action = `<button class="primary" id="sPost" type="button">Send ${rows.length} vendors to the email tracker</button>`;
-  const md = modal(`<div class="phead"><h2>Send to email tracker</h2><button class="ghost" id="sClose" type="button">Close</button></div>
-    <p class="note">${rows.length} vendor${rows.length === 1 ? '' : 's'} from <b>${esc(c.name)}</b> still need a W-9. They go to the <b>${esc(c.name)}</b> tab of your Sheet. Then the sender clicks <b>1099 Emails → Create my W-9 request drafts</b> in the Sheet.</p>
-    <p class="note">Sender: <b>${esc(c.senderName || 'not set')}</b> &lt;${esc(c.senderEmail || 'not set')}&gt;${!c.senderEmail ? ' — set it first so drafts land in the right Gmail.' : ''}${missing ? ` · ${missing} without a contact email (add it here or in the Sheet).` : ''}</p>
-    <div class="actions">${action}</div>
-    <details><summary class="note" style="cursor:pointer">Didn’t arrive? Other ways to send</summary>
-      <div class="actions" style="margin-top:8px" id="sAlt"></div>
-      <p class="note">Or copy rows and paste them into the Sheet’s <b>Paste_Inbox</b> tab at A2, then run <b>1099 Emails → Import pasted rows</b>.</p>
-      <button class="ghost" id="sCopy" type="button">Copy ${rows.length} rows</button></details>`, 'Send to email tracker');
+  const md = modal(`<div class="phead"><h2>Send to email tracker (${rows.length})</h2><button class="ghost" id="sClose" type="button">Close</button></div>
+    <p class="note">Appends these vendors to your Google Sheet’s <b>Vendors</b> tab. The Sheet’s trigger runs every morning at 9am, drafts customized emails in the sender’s Gmail (never sends automatically), tracks replies, and sends follow-ups 5 and 10 days later.</p>
+    ${missing ? `<p class="warnbox">${missing} vendor(s) have no contact email. You can add them in the table before sending, or directly in the Sheet.</p>` : ''}
+    <div class="pfoot"><button class="ghost" id="sCancel" type="button">Cancel</button>${action}</div>`, 'Send to email tracker');
   md.querySelector('#sClose').onclick = closeModal;
-  if (s.sheetUrl && rows.length) {
-    md.querySelector('#sAlt').innerHTML = sheetLinks(s, c.name, c.taxYear, sender, payload)
-      .map((u, i, all) => `<a class="ghost" style="text-decoration:none" href="${esc(u.url)}" target="_blank" rel="noopener">${all.length > 1 ? `Open link ${i + 1} of ${all.length}` : 'Send by link'} (${u.n})</a>`).join(' ');
-    md.querySelector('#sPost').onclick = async () => {
-      const b = md.querySelector('#sPost'); b.disabled = true; b.textContent = 'Sending…';
-      try {
-        await sendToSheet(s, c.name, c.taxYear, sender, payload);
-        const d = new Date().toISOString(); rows.forEach(v => Store.patchVendor(state.cid, v.fk, { rq: { s: 'tracker', d } }));
-        closeModal(); toast(`${rows.length} vendors sent — check the ${c.name} tab in your Sheet`);
-      } catch (e) { b.disabled = false; b.textContent = 'Try again'; toast('Couldn’t reach the Sheet: ' + e.message + '. Use the link option below.'); }
-    };
-  }
-  md.querySelector('#sCopy').onclick = async () => {
-    const tsv = rows.map(v => [c.name, v.n, v.cn || '', v.ce || '', r2(v.ev.rep), v.ev.fb, v.ev.s, c.senderName || '', c.senderEmail || '', c.taxYear].join('\t')).join('\n');
-    try { await navigator.clipboard.writeText(tsv); toast('Copied — paste into Paste_Inbox!A2'); } catch { toast('Copy failed — your browser blocked clipboard access'); }
+  md.querySelector('#sCancel').onclick = closeModal;
+  const p = md.querySelector('#sPost');
+  if (p) p.onclick = async () => {
+    p.disabled = true; p.textContent = 'Sending…';
+    try {
+      const res = await sendToSheet(s, c.name, payload, sender);
+      const now = new Date().toISOString();
+      rows.forEach(v => Store.patchVendor(state.cid, v.fk, { rq: { on: true, d: now } }));
+      const links = sheetLinks(s.sheetUrl);
+      closeModal();
+      modal(`<h2>${res.added || rows.length} vendors sent</h2><p class="note">They’re now in your Google Sheet. Tomorrow at 9am (or when you run "Create Gmail drafts now" from the Sheet menu), drafts will be waiting in Gmail.</p>
+        <p><a href="${esc(links.vendors)}" target="_blank" rel="noopener">Open Vendors tab</a> · <a href="${esc(links.drafts)}" target="_blank" rel="noopener">Open Drafts log</a></p>
+        <div class="pfoot"><button class="primary" id="sDone" type="button">Done</button></div>`, 'Sent');
+      $('modal').querySelector('#sDone').onclick = closeModal;
+    } catch (err) { toast('Send failed: ' + err.message); p.disabled = false; p.textContent = 'Retry'; }
   };
 }
 
@@ -361,12 +502,19 @@ function openSend(c, vs) {
 $('btnSettings').onclick = () => {
   const s = Store.settings();
   const md = modal(`<div class="phead"><h2>Settings</h2><button class="ghost" id="eClose" type="button">Close</button></div>
+    <div style="background:var(--brand-tint);border:1px solid rgba(1,213,164,0.3);padding:10px 12px;border-radius:8px;margin-bottom:14px;font-size:12.5px;color:var(--brand-ink)">
+      <b>Team-wide settings:</b> Synced to Firebase Firestore (<code>settings/main</code>) for all team members.
+    </div>
     <h3 style="font-size:15px">Google Sheet email tracker</h3>
     <div class="grid2"><label class="field">Web app URL<input id="eUrl" value="${esc(s.sheetUrl || '')}" placeholder="https://script.google.com/macros/s/…/exec"></label>
     <label class="field">App key (Sheet → Settings tab)<input id="eKey" value="${esc(s.sheetKey || '')}"></label></div>
     ${s.sheetUrl ? `<p class="note"><a href="${esc(s.sheetUrl.split('?')[0] + '?k=' + encodeURIComponent(s.sheetKey || ''))}" target="_blank" rel="noopener">Test the connection</a> — should say “Connected”.</p>` : ''}
     <h3 style="font-size:15px">Google Drive (read W-9 folders)</h3>
     <div class="grid2"><label class="field">Google OAuth Client ID<input id="eCid" value="${esc(s.googleClientId || '')}" placeholder="…apps.googleusercontent.com"></label></div>
+
+    <div style="background:var(--surface-2);border:1px solid var(--line);padding:10px 12px;border-radius:8px;margin:16px 0 10px;font-size:12.5px;color:var(--ink-2)">
+      <b>Personal settings:</b> Saved only in this browser (not shared across the team).
+    </div>
     <h3 style="font-size:15px">Optional: AI reading of scanned W-9s (Gemini)</h3>
     <div class="grid2"><label class="field">Gemini API key<input id="eGk" type="password" value="${esc(s.geminiKey || '')}" placeholder="Leave blank to skip"></label>
     <label class="field">Gemini model<input id="eGm" value="${esc(s.geminiModel || 'gemini-2.5-flash')}"></label></div>
@@ -403,11 +551,34 @@ function exportCsv(c, vs) {
 $('btnBackup').onclick = () => download(`ep1099-backup-${new Date().toISOString().slice(0, 10)}.json`, Store.exportJson(), 'application/json');
 $('btnRestore').onclick = () => $('restoreFile').click();
 $('restoreFile').onchange = async e => { const f = e.target.files[0]; e.target.value = ''; if (!f) return;
-  try { Store.importJson(await f.text()); state.cid = null; toast('Backup restored'); } catch (err) { toast('Restore failed: ' + err.message); } };
+  try { await Store.importJson(await f.text()); state.cid = null; toast('Backup restored'); } catch (err) { toast('Restore failed: ' + err.message); } };
 
 /* ------------------------------ boot ------------------------------ */
 $('btnUploadGl').onclick = () => $('glFile').click();
 $('glFile').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) readGl(f); };
 $('w9File').onchange = async e => { const fs = [...e.target.files]; e.target.value = ''; if (fs.length) processW9s(await expandFiles(fs)); };
+
+const btnImpLocal = $('btnImportLocal');
+if (btnImpLocal) {
+  btnImpLocal.onclick = async () => {
+    btnImpLocal.disabled = true;
+    toast('Importing local browser data to Firebase…');
+    try {
+      const res = await Store.importFromLocalStorage();
+      toast(res.message);
+      render();
+    } catch (err) {
+      toast('Import failed: ' + err.message);
+    } finally {
+      btnImpLocal.disabled = false;
+    }
+  };
+}
+
+Store.onAuthChange(user => {
+  renderAuth(user);
+  render();
+});
+
 Store.onChange(render);
 render();

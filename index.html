@@ -27,22 +27,34 @@
       </div>
     </div>
     <div class="grow"></div>
-    <span class="save" id="saveState">Saved on this computer</span>
+    <span class="save" id="saveState">Connecting…</span>
     <button class="tbtn" id="btnRules" type="button">IRS rules</button>
     <button class="tbtn internal" id="btnSettings" type="button">Settings</button>
+    <div id="userSection" class="user-section"></div>
   </header>
 
   <div class="shell" id="shell">
     <aside class="rail internal">
       <button class="primary" id="btnUploadGl" type="button">Upload general ledger</button>
-      <h3>Company trackers</h3>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:16px 0 8px">
+        <h3 style="margin:0">Company trackers</h3>
+      </div>
+      <div class="team-tabs" id="teamTabs">
+        <button type="button" class="team-tab active" data-scope="all">All clients</button>
+        <button type="button" class="team-tab" data-scope="my">My clients</button>
+      </div>
       <div class="clist" id="clist"></div>
-      <div class="actions"><button class="ghost" id="btnBackup" type="button">Back up data</button><button class="ghost" id="btnRestore" type="button">Restore</button></div>
-      <p class="note">Trackers are saved in this browser. Back up regularly, or move storage to Firebase (see ANTIGRAVITY_PROMPT.md).</p>
+      <div class="actions">
+        <button class="ghost" id="btnBackup" type="button">Back up data</button>
+        <button class="ghost" id="btnRestore" type="button">Restore</button>
+        <button class="ghost" id="btnImportLocal" type="button" title="Upload data saved locally in this browser to Firebase">Import from this browser</button>
+      </div>
+      <p class="note">Shared team storage via Firebase Firestore. Changes sync live across the team.</p>
     </aside>
     <main id="main"></main>
   </div>
 
+  <div id="authOverlay" class="auth-overlay" hidden></div>
   <input type="file" id="glFile" accept=".csv,.xlsx,.xls" hidden>
   <input type="file" id="w9File" accept=".pdf,.png,.jpg,.jpeg,.zip" multiple hidden>
   <input type="file" id="restoreFile" accept=".json" hidden>
