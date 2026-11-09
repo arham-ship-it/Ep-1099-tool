@@ -10,6 +10,7 @@
     "test": "node --test tests/logic.test.mjs"
   },
   "dependencies": {
+    "exceljs": "4.4.0",
     "firebase": "^13.2.0",
     "jszip": "3.10.1",
     "pdfjs-dist": "3.11.174",

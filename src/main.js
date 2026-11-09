@@ -201,6 +201,7 @@ function renderMain() {
       <button class="ghost internal" id="aDrive" type="button">Read W-9s from Drive</button>
       <button class="primary internal" id="aSend" type="button">Send ${st.req} to email tracker</button>
       <button class="ghost" id="aView" type="button">${cv ? 'Back to full tracker' : 'Client view'}</button>
+      <button class="ghost" id="aXlsx" type="button">Download tracker (Excel)</button>
       <button class="ghost internal" id="aCsv" type="button">Export CSV</button>
       <button class="ghost internal" id="aDel" type="button">Delete</button>
     </div></div></section>
@@ -275,6 +276,18 @@ function bindMain(c, vs) {
   m.querySelector('#aSend').onclick = () => openSend(c, vs);
   m.querySelector('#aView').onclick = () => { state.clientView = !state.clientView; renderMain(); };
   m.querySelector('#aCsv').onclick = () => exportCsv(c, vs);
+  m.querySelector('#aXlsx').onclick = async e => {
+    const b = e.currentTarget; b.disabled = true; b.textContent = 'Building…';
+    try {
+      const { buildTrackerXlsx } = await import('./trackerXlsx.js');
+      const blob = await buildTrackerXlsx(c, vs, { assignee: c.assignedToName || c.assignedTo || '' });
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = `${slug(c.name)}-1099-tracker-${c.taxYear}.xlsx`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+      toast('Tracker downloaded');
+    } catch (err) { toast('Couldn’t build the tracker: ' + err.message); }
+    finally { b.disabled = false; b.textContent = 'Download tracker (Excel)'; }
+  };
   m.querySelector('#aDel').onclick = () => {
     const md = modal(`<h2>Delete the ${esc(c.name)} tracker?</h2><p class="note">This removes its vendors, W-9 status and contacts from this browser.</p><div class="pfoot"><button class="ghost" id="cNo" type="button">Cancel</button><button class="primary" id="cYes" type="button" style="background:var(--bad);color:#fff">Delete tracker</button></div>`, 'Delete tracker');
     md.querySelector('#cNo').onclick = closeModal; md.querySelector('#cYes').onclick = () => { closeModal(); Store.deleteClient(cid); state.cid = null; toast('Tracker deleted'); };
@@ -375,7 +388,7 @@ function runImport() {
     imp.accounts.filter(a => a.co === co && a.cat).forEach(a => accountMap[a.acct + '|' + a.an] = a.cat);
     Store.putVendors(cid, out);
     Store.putClient(cid, { name: co, taxYear: imp.taxYear, glFile: imp.name, importedAt: new Date().toISOString(), accountMap,
-      driveUrl: prev.driveUrl || '', senderName: prev.senderName || '', senderEmail: prev.senderEmail || '', assignedTo: prev.assignedTo || '' });
+      driveUrl: prev.driveUrl || '', senderName: prev.senderName || '', senderEmail: prev.senderEmail || '', assignedTo: prev.assignedTo || '', assignedToName: prev.assignedToName || '' });
     const st = stats(Object.values(out), rulesFor(imp.taxYear));
     lines.push(`<b>${esc(co)}</b>: ${st.paid} vendors · ${st.scope} need a 1099 · ${st.rev} need review`);
   }
