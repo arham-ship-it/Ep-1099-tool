@@ -74,11 +74,40 @@ test('QuickBooks report-style General Ledger (account headings, totals, split co
   const idx = mapHeaders(p.headers);
   const map = {};
   listAccounts(p.rows, idx, 2026, p.companyHint).forEach(a => { const c = suggestCategory(a.an); if (c) map[a.co + '|' + a.acct + '|' + a.an] = c; });
-  assert.equal(map['Elexity, Inc.||4000 Sales'], 'Not Reportable');
   const { cos } = aggregate(p.rows, idx, 2026, p.companyHint, map);
   const v = cos['Elexity, Inc.'];
   assert.equal(v['abc consulting'].c.Services, 14200);
   assert.equal(evaluate({ ...v['abc consulting'], e: 'Unknown' }, rulesFor(2026)).s, S.W9);
   assert.equal(v['cloud freelancer'].x, 5000);   // paid by Amex -> 1099-K
-  assert.equal(evaluate({ ...v['honda of surprise c honda of surprise'], e: 'Unknown' }, rulesFor(2026)).s, S.NOT); // customer, sales account
+  assert.equal(v['honda of surprise c honda of surprise'], undefined); // customer invoice skipped
+});
+
+test('QuickBooks Online GL with "Distribution account" column and revenue accounts', async () => {
+  const { prepareSheet } = await import('../src/logic.js');
+  const H = ['', 'Distribution account', 'Transaction date', 'Transaction type', 'Num', 'Name', 'Description', 'Split', 'Amount', 'Balance'];
+  const aoa = [
+    ['Elexity, Inc.'], ['General Ledger'], ['January, 2025-December, 2026'], [], H,
+    ['1003 Chase Checking', '', '', '', '', '', '', '', '', ''],
+    ['', 'Beginning Balance', '', '', '', '', '', '', '', 1000],
+    ['', '1003 Chase Checking', '01/06/2026', 'Payment', '', 'Longroad Energy', '', '1100 Accounts Receivable', 16200, 0],
+    ['', '1003 Chase Checking', '02/06/2026', 'Expense', '', 'Sandra Murray', '', '5218 R&D - Contractor', -27500, 0],
+    ['Total for 1003 Chase Checking', '', '', '', '', '', '', '', 0, ''],
+    ['', '4043 Professional Services', '03/01/2026', 'Invoice', '', 'Longroad Energy', '', '1100 Accounts Receivable', 585000, 0],
+    ['', '5218 R&D - Contractor', '02/06/2026', 'Expense', '', 'Sandra Murray', '', '1003 Chase Checking', 27500, 0],
+    ['', '5218 R&D - Contractor', '03/06/2026', 'Expense', '', 'Ramp Dev', '', '2160 Divvy', 9000, 0],
+    ['', '7170 G&A - Legal Fees', '04/06/2025', 'Bill', '', 'Brix Law LLP', '', '2000 Accounts Payable', 5000, 0]
+  ];
+  const p = prepareSheet(aoa);
+  const idx = mapHeaders(p.headers);
+  assert.equal(p.rows.length, 6);
+  const accts = listAccounts(p.rows, idx, 2026, p.companyHint);
+  const map = {}; accts.forEach(a => { const c = suggestCategory(a.an || a.acct); if (c) map[a.co + '|' + a.acct + '|' + a.an] = c; });
+  assert.equal(suggestCategory('4043 Professional Services'), 'Not Reportable');
+  assert.equal(suggestCategory('5124 Operations - Electrical Contractor'), 'Services');
+  const v = aggregate(p.rows, idx, 2026, p.companyHint, map).cos['Elexity, Inc.'];
+  assert.equal(v['longroad energy'], undefined);              // customer never listed
+  assert.equal(evaluate({ ...v['sandra murray'], e: 'Unknown' }, rulesFor(2026)).s, S.W9);
+  assert.equal(v['sandra murray'].c.Services, 27500);
+  assert.equal(v['ramp dev'].x, 9000);                         // paid on Divvy card
+  assert.equal(v['brix law'], undefined);                      // 2025 line ignored for 2026
 });

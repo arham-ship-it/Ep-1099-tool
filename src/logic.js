@@ -49,8 +49,11 @@ export const r2 = n => Math.round(n * 100) / 100;
 export const money = n => (n < 0 ? '-$' : '$') + Math.abs(Math.round(n)).toLocaleString('en-US');
 
 export function isCard(m) {
-  return /\b(credit|debit|card|cc|visa|master ?card|amex|american express|discover|paypal|venmo|stripe|square|p-?card)\b/i.test(String(m || ''));
+  return /\b(credit|debit|card|cc|visa|master ?card|amex|american express|discover|paypal|venmo|stripe|square|p-?card|divvy|brex|ramp)\b/i.test(String(m || ''));
 }
+/** Customer-side transactions (revenue, A/R) — never payments to vendors, so they are skipped. */
+export const CUSTOMER_TXN = /^(invoice|payment|receive payment|sales receipt|credit memo|deposit|refund receipt|estimate|statement charge|delayed charge|delayed credit|inventory starting value|inventory qty adjust)$/i;
+const isCustomerTxn = (r, idx) => idx.txnType !== undefined && CUSTOMER_TXN.test(String(r[idx.txnType] ?? '').trim());
 export function toNum(v) {
   if (typeof v === 'number') return v;
   let s = String(v ?? '').trim(); if (!s) return 0;
@@ -71,8 +74,13 @@ export function yearOf(v) {
 }
 export function suggestCategory(name) {
   const n = String(name || '').toLowerCase(); if (!n) return '';
+  // Standard chart of accounts: 1xxx assets, 2xxx liabilities, 3xxx equity, 4xxx revenue -> never vendor expenses
+  const num = n.match(/^\s*(\d)\d{3,4}\b/);
+  if (num && '1234'.includes(num[1])) return 'Not Reportable';
   if (/settlement/.test(n)) return '';
   if (/legal|attorney|law firm|lawyer|litigation/.test(n)) return 'Legal Services';
+  if (/contractor|subcontract|consult|freelanc|professional fee/.test(n)) return 'Services';
+  if (/equipment|hardware|meter|controller|batter|thermostat|\baws\b|hosting|workers comp|bonus|deposit|discount|refund|bad debt|exchange|gain or loss|incentive|cost of sales|\bdivvy\b|\bbrex\b|\bramp\b/.test(n)) return 'Not Reportable';
   if (/royalt/.test(n)) return 'Royalties';
   if (/\brent|lease/.test(n)) return 'Rent';
   if (/medical|health ?care|clinic|physician|doctor/.test(n)) return 'Medical';
@@ -87,13 +95,14 @@ export const ALIASES = {
   company: ['company', 'entity', 'company name', 'subsidiary', 'legal entity', 'client'],
   date: ['payment date', 'date', 'txn date', 'transaction date', 'posting date', 'check date'],
   vendor: ['vendor', 'vendor name', 'payee', 'name', 'supplier', 'supplier name'],
-  account: ['gl account', 'account', 'account number', 'account #', 'acct', 'account no', 'gl code'],
+  txnType: ['transaction type', 'type', 'txn type', 'trans type'],
+  account: ['gl account', 'account', 'distribution account', 'account number', 'account #', 'acct', 'account no', 'gl code'],
   accountName: ['account name', 'account description', 'gl account name', 'account title'],
   amount: ['amount', 'net amount', 'paid amount', 'payment amount'],
   debit: ['debit'], credit: ['credit'],
   method: ['payment method', 'method', 'pay method', 'payment type', 'payment mode', 'split', 'payment account']
 };
-export const FIELD_LABELS = { company: 'Company', date: 'Payment date', vendor: 'Vendor', account: 'GL account', accountName: 'Account name',
+export const FIELD_LABELS = { company: 'Company', date: 'Payment date', txnType: 'Transaction type', vendor: 'Vendor', account: 'GL account', accountName: 'Account name',
   amount: 'Amount', debit: 'Debit', credit: 'Credit', method: 'Payment method' };
 
 /**
@@ -114,7 +123,18 @@ export function prepareSheet(aoa) {
   let headers = aoa[h].map(x => String(x ?? '').trim());
   let rows = aoa.slice(h + 1).filter(r => filled(r));
   const idx = mapHeaders(headers);
-  if (idx.account !== undefined || idx.accountName !== undefined) return { headers, rows, companyHint, grouped: false };
+  if (idx.account !== undefined || idx.accountName !== undefined) {
+    // Account is already a column (e.g. QuickBooks "Distribution account"): just drop report heading / total rows.
+    const amt = idx.amount ?? idx.debit;
+    rows = rows.filter(r => {
+      const t = String(r.find(x => String(x ?? '').trim() !== '') ?? '').trim();
+      if (/^total\b/i.test(t) || /^(beginning|opening|ending) balance$/i.test(t)) return false;
+      const noDate = idx.date !== undefined && String(r[idx.date] ?? '').trim() === '';
+      const noAmt = amt !== undefined && String(r[amt] ?? '').trim() === '';
+      return !(noDate && noAmt);
+    });
+    return { headers, rows, companyHint, grouped: false };
+  }
 
   const dateCol = idx.date, amtCol = idx.amount ?? idx.debit, vendCol = idx.vendor;
   const firstText = r => { const i = r.findIndex(x => String(x ?? '').trim() !== ''); return i < 0 ? null : { i, t: String(r[i]).trim() }; };
@@ -152,7 +172,8 @@ const inYear = (r, idx, y) => { if (idx.date === undefined) return true; const l
 export function listAccounts(rows, idx, taxYear, defaultCo) {
   const m = {};
   for (const r of rows) {
-    if (!inYear(r, idx, taxYear)) continue;
+    if (!inYear(r, idx, taxYear) || isCustomerTxn(r, idx)) continue;
+    if (!String(r[idx.vendor] ?? '').trim()) continue; // lines with no payee can't create a 1099
     if (idx.method !== undefined && isCard(r[idx.method])) continue;
     const co = lineCompany(r, idx, defaultCo);
     const acct = idx.account !== undefined ? String(r[idx.account] ?? '').trim() : '';
@@ -169,6 +190,7 @@ export function aggregate(rows, idx, taxYear, defaultCo, map) {
   for (const r of rows) {
     const vendor = String(r[idx.vendor] ?? '').trim(); if (!vendor) continue;
     if (!inYear(r, idx, taxYear)) { skipped++; continue; }
+    if (isCustomerTxn(r, idx)) continue;
     const amt = lineAmount(r, idx); if (!amt) continue;
     const co = lineCompany(r, idx, defaultCo);
     const key = normalizeVendor(vendor);

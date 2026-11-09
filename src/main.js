@@ -3,7 +3,7 @@ import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import {
   RULES, RULES_VERIFIED, CATS, ENTITIES, S, FIELD_LABELS, latestYear, rulesFor, normalizeVendor, fieldKey, slug, cidFor, r2, money,
-  mapHeaders, prepareSheet, listAccounts, aggregate, evaluate, w9State, stats, matchByName, suggestCategory
+  mapHeaders, prepareSheet, listAccounts, yearOf, aggregate, evaluate, w9State, stats, matchByName, suggestCategory
 } from './logic.js';
 import { Store } from './store.js';
 import { loginWithGoogle, logoutUser } from './firebase.js';
@@ -318,12 +318,15 @@ function renderImport() {
   let body = '';
   if (imp.step === 1) {
     const opt = k => `<select id="m_${k}"><option value="">— not in file —</option>${imp.headers.map((h, i) => `<option value="${i}" ${imp.idx[k] === i ? 'selected' : ''}>${esc(h)}</option>`).join('')}</select>`;
-    body = `<p class="note"><b>${esc(imp.name)}</b> · ${imp.rows.length.toLocaleString()} lines. Check that each field points at the right column.</p>
-      ${imp.grouped ? '<p class="okbox">Report-style ledger detected (QuickBooks/Xero): account headings were copied onto each transaction as "Account Name", and Total / Beginning Balance rows were skipped.</p>' : ''}
+    body = `<p class="note"><b>${esc(imp.name)}</b> · ${imp.rows.length.toLocaleString()} transaction lines. Check that each field points at the right column.</p>
+      ${imp.grouped ? '<p class="okbox">Report-style ledger detected (QuickBooks/Xero): account headings were copied onto each transaction as “Account Name”, and Total / Beginning Balance rows were skipped.</p>' : ''}
       <div class="grid2">${Object.keys(FIELD_LABELS).map(k => `<label class="field">${FIELD_LABELS[k]}${k === 'vendor' ? ' *' : ''}${opt(k)}</label>`).join('')}
       <label class="field">Tax year<select id="m_year">${Object.keys(RULES).map(y => `<option ${+y === imp.taxYear ? 'selected' : ''}>${y}</option>`).join('')}<option>${latestYear() + 1}</option></select></label>
       <label class="field">Company name (if no Company column)<input id="m_co" value="${esc(imp.defaultCo)}" placeholder="e.g. Acme Holdings LLC"></label></div>
       ${imp.idx.method === undefined ? '<p class="warnbox">No payment method column found. Card and PayPal payments can’t be excluded — use the AP payment register if you can.</p>' : ''}`;
+  } else if (imp.step === 2 && !imp.accounts.length) {
+    const yrs = {}; imp.rows.forEach(r => { const y = imp.idx.date !== undefined ? yearOf(r[imp.idx.date]) : 0; if (y) yrs[y] = (yrs[y] || 0) + 1; });
+    body = `<p class="warnbox">No vendor payment lines found for tax year <b>${imp.taxYear}</b>. ${imp.rows.length.toLocaleString()} lines were read; years found in the file: ${Object.keys(yrs).map(y => `${y} (${yrs[y].toLocaleString()} lines)`).join(', ') || 'none — check the Payment date column'}. Go back and pick the right tax year, or check the Vendor, Amount and Payment date columns.</p>`;
   } else if (imp.step === 2) {
     body = `<p class="note">Pick the 1099 category for each GL account. Suggestions come from the account name — review every row, especially blanks. Saved per company for next time.</p>
       <div class="tablewrap" style="max-height:55vh;overflow:auto"><table style="min-width:640px"><thead><tr><th>Company</th><th>Account</th><th style="text-align:right">Total</th><th>1099 category</th></tr></thead><tbody>
@@ -337,11 +340,11 @@ function renderImport() {
     const idx = {}; Object.keys(FIELD_LABELS).forEach(k => { const v = md.querySelector('#m_' + k).value; if (v !== '') idx[k] = +v; });
     if (idx.vendor === undefined) return toast('Choose the Vendor column.');
     if (idx.amount === undefined && idx.debit === undefined) return toast('Choose the Amount (or Debit) column.');
-    imp.idx = idx; imp.taxYear = +md.querySelector('#m_year').value; imp.defaultCo = md.querySelector('#m_co').value.trim();
-    imp.accounts = listAccounts(imp.rows, imp.idx, imp.defaultCo);
-    const saved = (Store.settings().acctMap || {});
+    imp.idx = idx; imp.taxYear = +md.querySelector('#m_year').value; imp.defaultCo = md.querySelector('#m_co').value.trim() || imp.name.replace(/\.[^.]+$/, '');
+    imp.accounts = listAccounts(imp.rows, imp.idx, imp.taxYear, imp.defaultCo);
     for (const a of imp.accounts) {
-      const sk = `${a.co}::${a.acct}::${a.an}`;
+      const saved = (Store.clients()[cidFor(a.co)] || {}).accountMap || {};
+      const sk = a.acct + '|' + a.an;
       if (saved[sk]) { a.cat = saved[sk]; a.src = 'Saved mapping'; } else { a.cat = suggestCategory(a.an || a.acct); a.src = a.cat ? 'Suggested — check' : ''; }
     }
     imp.step = 2; renderImport();
@@ -355,26 +358,26 @@ function renderImport() {
 }
 
 function runImport() {
-  const amap = {}; imp.accounts.forEach(a => amap[`${a.co}::${a.acct}::${a.an}`] = a.cat);
-  const curMap = { ...(Store.settings().acctMap || {}), ...amap };
-  Store.putSettings({ acctMap: curMap });
-  const { byCompany, skipped } = aggregate(imp.rows, imp.idx, imp.taxYear, imp.defaultCo, amap);
-  const cos = Object.keys(byCompany);
-  if (!cos.length) return toast(`No rows in ${imp.taxYear} found with positive payments.`);
+  const map = {}; imp.accounts.forEach(a => { if (a.cat) map[a.co + '|' + a.acct + '|' + a.an] = a.cat; });
+  const { cos, skipped } = aggregate(imp.rows, imp.idx, imp.taxYear, imp.defaultCo, map);
   const lines = []; imp.firstCid = null;
-  for (const name of cos) {
-    const cid = cidFor(name);
-    if (!imp.firstCid) imp.firstCid = cid;
-    const curV = Store.vendors(cid);
-    const inc = byCompany[name];
-    const merged = { ...curV };
-    for (const k of Object.keys(inc)) {
-      if (merged[k]) { merged[k] = { ...merged[k], t: inc[k].t, x: inc[k].x, e: merged[k].e || inc[k].e, cn: merged[k].cn || '', ce: merged[k].ce || '' }; }
-      else merged[k] = inc[k];
+  for (const co of Object.keys(cos).sort()) {
+    const cid = cidFor(co); imp.firstCid ??= cid;
+    const old = Store.vendors(cid); const out = {};
+    for (const key in cos[co]) {
+      const a = cos[co][key]; const fk = fieldKey(key); const o = old[fk] || {};
+      out[fk] = { n: a.n, k: a.k, t: r2(a.t), x: r2(a.x), c: Object.fromEntries(Object.entries(a.c).map(([k, v]) => [k, r2(v)])), u: r2(a.u), ua: a.ua, nr: a.nr,
+        e: o.e || 'Unknown', cn: o.cn || '', ce: o.ce || '', w9: o.w9 || null, rq: o.rq || null };
     }
-    Store.putVendors(cid, merged);
-    Store.putClient(cid, { name, taxYear: imp.taxYear, glFile: imp.name, importedAt: new Date().toISOString() });
-    lines.push(`<b>${esc(name)}</b>: ${Object.keys(inc).length} vendors paid in ${imp.taxYear}`);
+    for (const fk in old) if (fk.startsWith('v_') && !out[fk] && old[fk].w9 && old[fk].w9.on) out[fk] = { ...old[fk], t: 0, x: 0, c: {}, u: 0, ua: [], nr: [] };
+    const prev = Store.clients()[cid] || {};
+    const accountMap = { ...(prev.accountMap || {}) };
+    imp.accounts.filter(a => a.co === co && a.cat).forEach(a => accountMap[a.acct + '|' + a.an] = a.cat);
+    Store.putVendors(cid, out);
+    Store.putClient(cid, { name: co, taxYear: imp.taxYear, glFile: imp.name, importedAt: new Date().toISOString(), accountMap,
+      driveUrl: prev.driveUrl || '', senderName: prev.senderName || '', senderEmail: prev.senderEmail || '', assignedTo: prev.assignedTo || '' });
+    const st = stats(Object.values(out), rulesFor(imp.taxYear));
+    lines.push(`<b>${esc(co)}</b>: ${st.paid} vendors · ${st.scope} need a 1099 · ${st.rev} need review`);
   }
   imp.summary = lines.join('<br>') + (skipped ? `<br>${skipped} lines outside ${imp.taxYear} were ignored.` : '');
   imp.step = 3; renderImport();
