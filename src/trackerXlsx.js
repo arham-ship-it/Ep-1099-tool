@@ -4,7 +4,7 @@ import ExcelJS from 'exceljs';
 import { S, money } from './logic.js';
 
 const C = {
-  navy: '1C2A4D', teal: '00B38C', white: 'FFFFFF', ink: '1C2A4D', muted: '55627D', line: 'DBE3EA', band: 'F5F8FB', sub: 'C9D3EA',
+  navy: '1C2A4D', teal: '00C49A', mint: 'E6F9F4', white: 'FFFFFF', ink: '1C2A4D', muted: '55627D', line: 'D5E6E1', band: 'FFFFFF', sub: '55627D',
   red: 'FDE2E6', redInk: 'B4233B', yellow: 'FFF0CC', yellowInk: '8A5A00', blue: 'E1EAFF', blueInk: '2357C6',
   green: 'DCF4E8', greenInk: '11845B', orange: 'FFE3D1', orangeInk: 'B3470E', grey: 'ECEFF3', greyInk: '5F6B80'
 };
@@ -41,10 +41,12 @@ export async function buildTrackerXlsx(c, vs, opts = {}) {
   const rng = l => `${l}${FIRST}:${l}${LAST}`;
 
   // Title band
-  for (let r = 1; r <= 2; r++) for (let i = 1; i <= COLS.length; i++) ws.getCell(r, i).fill = fill(C.navy);
+  for (let r = 1; r <= 2; r++) for (let i = 1; i <= COLS.length; i++) ws.getCell(r, i).fill = fill(C.white);
+  for (let i = 1; i <= COLS.length; i++) ws.getCell(2, i).border = { bottom: { style: 'thick', color: argb(C.teal) } };
   ws.mergeCells(1, 1, 1, 8); ws.mergeCells(2, 1, 2, 8);
   ws.getCell(1, 1).value = `${c.name}  —  1099 W-9 Tracker`;
-  ws.getCell(1, 1).font = { name: FONT, size: 18, bold: true, color: argb(C.white) };
+  ws.getCell(1, 1).font = { name: FONT, size: 18, bold: true, color: argb(C.navy) };
+  ws.getCell(1, 9).value = 'Enduring Planet'; ws.getCell(1, 9).font = { name: FONT, size: 12, bold: true, color: argb(C.teal) };
   ws.getCell(2, 1).value = `Tax year ${c.taxYear}   ·   Sender: ${c.senderName || '—'} ${c.senderEmail ? '<' + c.senderEmail + '>' : ''}   ·   1099s due to vendors and IRS by January 31, ${c.taxYear + 1}   ·   Exported ${new Date().toLocaleDateString('en-US')}`;
   ws.getCell(2, 1).font = { name: FONT, size: 10, color: argb(C.sub) };
   ws.getRow(1).height = 32; ws.getRow(2).height = 20; ws.getRow(3).height = 8;
@@ -65,10 +67,12 @@ export async function buildTrackerXlsx(c, vs, opts = {}) {
   const results = [st.need, st.req, st.trk, 0, st.rec, st.need ? st.rec / st.need : 0, st.rev, vs.length];
   kpis.forEach((k, i) => {
     const lab = ws.getCell(4, i + 1), val = ws.getCell(5, i + 1);
-    lab.value = k[0]; lab.font = { name: FONT, size: 9, color: argb(C.muted) };
+    lab.value = k[0]; lab.font = { name: FONT, size: 9, bold: true, color: argb(C.navy) };
     val.value = k[1] ? { formula: k[1], result: results[i] } : vs.length;
     val.font = { name: FONT, size: 20, bold: true, color: argb(k[3]) };
-    [lab, val].forEach(x => { x.fill = fill(k[2]); x.alignment = { horizontal: 'center', vertical: 'middle' }; x.border = { top: thin, left: thin, bottom: thin, right: thin }; });
+    const g = { style: 'thin', color: argb(C.teal) };
+    lab.fill = fill(C.mint); val.fill = fill(C.white);
+    [lab, val].forEach(x => { x.alignment = { horizontal: 'center', vertical: 'middle' }; x.border = { top: g, left: g, bottom: g, right: g }; });
   });
 
   ws.getRow(4).height = 18; ws.getRow(5).height = 34;
@@ -83,7 +87,7 @@ export async function buildTrackerXlsx(c, vs, opts = {}) {
 
   // Header + rows
   const hdr = ws.getRow(HR);
-  COLS.forEach((c, i) => { const x = hdr.getCell(i + 1); x.value = c.h; x.font = { name: FONT, size: 10, bold: true, color: argb(C.white) }; x.fill = fill(C.navy); x.alignment = { vertical: 'middle', wrapText: true }; });
+  COLS.forEach((c, i) => { const x = hdr.getCell(i + 1); x.value = c.h; x.font = { name: FONT, size: 10, bold: true, color: argb(C.navy) }; x.fill = fill(C.teal); x.alignment = { vertical: 'middle', wrapText: true }; });
   hdr.height = 30;
   tracked.forEach((v, i) => {
     const r = ws.getRow(FIRST + i);
@@ -124,10 +128,10 @@ export async function buildTrackerXlsx(c, vs, opts = {}) {
   ].forEach((cf, i) => { cf.rules[0].priority = i + 1; ws.addConditionalFormatting(cf); });
 
   /* ---------------- Sheet 2: All vendors ---------------- */
-  const all = wb.addWorksheet('All vendors', { views: [{ state: 'frozen', ySplit: 1, showGridLines: false }], properties: { tabColor: argb(C.navy) } });
+  const all = wb.addWorksheet('All vendors', { views: [{ state: 'frozen', ySplit: 1, showGridLines: false }], properties: { tabColor: argb(C.teal) } });
   all.columns = [{ header: 'Vendor', width: 34 }, { header: 'Total paid ($)', width: 14 }, { header: 'Card / PayPal ($)', width: 15 }, { header: 'Reportable ($)', width: 14 },
     { header: '1099 Status', width: 14 }, { header: 'Form / Box', width: 13 }, { header: 'Entity Type', width: 22 }, { header: 'Why', width: 80 }];
-  all.getRow(1).eachCell(x => { x.font = { name: FONT, bold: true, color: argb(C.white) }; x.fill = fill(C.navy); });
+  all.getRow(1).eachCell(x => { x.font = { name: FONT, bold: true, color: argb(C.navy) }; x.fill = fill(C.teal); });
   sorted.forEach(v => all.addRow([v.n, v.t, v.x, Math.round(v.ev.rep * 100) / 100, v.ev.s, v.ev.fb || '—', v.e || 'Unknown', v.ev.why]));
   [2, 3, 4].forEach(i => { all.getColumn(i).numFmt = '$#,##0'; });
   all.getColumn(8).alignment = { wrapText: true, vertical: 'top' };

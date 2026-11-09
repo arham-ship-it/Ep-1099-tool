@@ -480,37 +480,46 @@ async function readFromDrive(c) {
   } catch (err) { toast('Drive error: ' + err.message); }
 }
 
-/* ------------------------------- email tracker ------------------------------- */
+/* --------------------------- email tracker --------------------------- */
 function openSend(c, vs) {
   const rows = vs.filter(v => v.w === 'req');
   const s = Store.settings();
   const payload = rows.map(v => [v.n, v.cn || '', v.ce || '', r2(v.ev.rep), v.ev.fb, v.ev.s]);
   const sender = [c.senderName || '', c.senderEmail || ''];
   const missing = rows.filter(v => !v.ce).length;
+  // Company (Workspace) deployments only accept signed-in browsers, so the link is the way to send.
+  const domainOnly = /\/a\/macros\//.test(s.sheetUrl || '');
+  const links = s.sheetUrl && rows.length ? sheetLinks(s, c.name, c.taxYear, sender, payload) : [];
+  const linkHtml = links.map((u, i, all) => `<a class="primary" data-link="${i}" style="text-decoration:none;display:inline-block" href="${esc(u.url)}" target="_blank" rel="noopener">${all.length > 1 ? `Send part ${i + 1} of ${all.length} (${u.n} vendors)` : `Send ${u.n} vendors to the email tracker`}</a>`).join(' ');
   let action = '';
   if (!s.sheetUrl) action = '<p class="warnbox">Connect your Google Sheet email tracker first (Settings, top right).</p>';
   else if (!rows.length) action = '<p class="okbox">Nothing to send — every vendor that needs a 1099 has a W-9 or is already in the tracker.</p>';
-  else action = `<button class="primary" id="sPost" type="button">Send ${rows.length} vendors to the email tracker</button>`;
-  const md = modal(`<div class="phead"><h2>Send to email tracker (${rows.length})</h2><button class="ghost" id="sClose" type="button">Close</button></div>
-    <p class="note">Appends these vendors to your Google Sheet’s <b>Vendors</b> tab. The Sheet’s trigger runs every morning at 9am, drafts customized emails in the sender’s Gmail (never sends automatically), tracks replies, and sends follow-ups 5 and 10 days later.</p>
-    ${missing ? `<p class="warnbox">${missing} vendor(s) have no contact email. You can add them in the table before sending, or directly in the Sheet.</p>` : ''}
-    <div class="pfoot"><button class="ghost" id="sCancel" type="button">Cancel</button>${action}</div>`, 'Send to email tracker');
+  else action = domainOnly ? linkHtml : `<button class="primary" id="sPost" type="button">Send ${rows.length} vendors to the email tracker</button>`;
+  const md = modal(`<div class="phead"><h2>Send to email tracker</h2><button class="ghost" id="sClose" type="button">Close</button></div>
+    <p class="note">${rows.length} vendor${rows.length === 1 ? '' : 's'} from <b>${esc(c.name)}</b> still need a W-9. They go to the <b>${esc(c.name)}</b> tab of the EP 1099 Email Tracker Sheet. Then the sender clicks the green <b>Create W-9 drafts</b> button on that tab — drafts land in their Gmail; nothing is sent automatically.</p>
+    <p class="note">Sender: <b>${esc(c.senderName || 'not set')}</b> &lt;${esc(c.senderEmail || 'not set')}&gt;${!c.senderEmail ? ' — set it first so drafts land in the right Gmail.' : ''}${missing ? ` · ${missing} without a contact email (add it here or in the Sheet).` : ''}</p>
+    <div class="actions">${action}</div>
+    ${domainOnly && rows.length ? '<p class="note">A new tab opens and says “Added to the email tracker”. Then come back and click the button below.</p>' : ''}
+    <details><summary class="note" style="cursor:pointer">Didn’t arrive? Other ways to send</summary>
+      <div class="actions" style="margin-top:8px" id="sAlt">${domainOnly ? '' : linkHtml.replace(/class="primary"/g, 'class="ghost"')}</div>
+      <p class="note">Or copy rows and paste them into the Sheet’s <b>Paste_Inbox</b> tab at A2, then run <b>1099 Emails → Import pasted rows</b>.</p>
+      <button class="ghost" id="sCopy" type="button">Copy ${rows.length} rows</button></details>
+    <div class="pfoot"><button class="ghost" id="sMark" type="button" ${rows.length ? '' : 'disabled'}>Done — mark these vendors as requested</button></div>`, 'Send to email tracker');
   md.querySelector('#sClose').onclick = closeModal;
-  md.querySelector('#sCancel').onclick = closeModal;
-  const p = md.querySelector('#sPost');
-  if (p) p.onclick = async () => {
-    p.disabled = true; p.textContent = 'Sending…';
+  const markRequested = () => { const d = new Date().toISOString(); rows.forEach(v => Store.patchVendor(state.cid, v.fk, { rq: { s: 'tracker', d } })); };
+  md.querySelector('#sMark').onclick = () => { markRequested(); closeModal(); toast(`${rows.length} vendors marked as requested`); };
+  md.querySelectorAll('[data-link]').forEach(a => a.addEventListener('click', () => { a.textContent = 'Opened ↗ — check the new tab'; }));
+  const post = md.querySelector('#sPost');
+  if (post) post.onclick = async () => {
+    post.disabled = true; post.textContent = 'Sending…';
     try {
-      const res = await sendToSheet(s, c.name, payload, sender);
-      const now = new Date().toISOString();
-      rows.forEach(v => Store.patchVendor(state.cid, v.fk, { rq: { on: true, d: now } }));
-      const links = sheetLinks(s.sheetUrl);
-      closeModal();
-      modal(`<h2>${res.added || rows.length} vendors sent</h2><p class="note">They’re now in your Google Sheet. Tomorrow at 9am (or when you run "Create Gmail drafts now" from the Sheet menu), drafts will be waiting in Gmail.</p>
-        <p><a href="${esc(links.vendors)}" target="_blank" rel="noopener">Open Vendors tab</a> · <a href="${esc(links.drafts)}" target="_blank" rel="noopener">Open Drafts log</a></p>
-        <div class="pfoot"><button class="primary" id="sDone" type="button">Done</button></div>`, 'Sent');
-      $('modal').querySelector('#sDone').onclick = closeModal;
-    } catch (err) { toast('Send failed: ' + err.message); p.disabled = false; p.textContent = 'Retry'; }
+      await sendToSheet(s, c.name, c.taxYear, sender, payload);
+      markRequested(); closeModal(); toast(`${rows.length} vendors sent — check the ${c.name} tab in your Sheet`);
+    } catch (e) { post.disabled = false; post.textContent = 'Try again'; toast('Couldn’t reach the Sheet: ' + e.message + '. Use "Didn’t arrive?" below.'); }
+  };
+  md.querySelector('#sCopy').onclick = async () => {
+    const tsv = rows.map(v => [c.name, v.n, v.cn || '', v.ce || '', r2(v.ev.rep), v.ev.fb, v.ev.s, c.senderName || '', c.senderEmail || '', c.taxYear].join('\t')).join('\n');
+    try { await navigator.clipboard.writeText(tsv); toast('Copied — paste into Paste_Inbox!A2'); } catch { toast('Copy failed — your browser blocked clipboard access'); }
   };
 }
 
