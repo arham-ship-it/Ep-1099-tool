@@ -1,7 +1,7 @@
 // Builds the formatted, colour-coded 1099 tracker workbook (.xlsx) for one company.
 // Same layout as the company tabs in the EP 1099 Email Tracker Google Sheet.
 import ExcelJS from 'exceljs';
-import { S, money } from './logic.js';
+import { S, money, isRelevant, filingDue } from './logic.js';
 
 const C = {
   navy: '1C2A4D', teal: '00C49A', mint: 'E6F9F4', white: 'FFFFFF', ink: '1C2A4D', muted: '55627D', line: 'D5E6E1', band: 'FFFFFF', sub: '55627D',
@@ -31,6 +31,7 @@ export async function buildTrackerXlsx(c, vs, opts = {}) {
   const order = { 'Eligible': 0, 'Needs W-9': 1, 'Needs review': 2, 'Not eligible': 3 };
   const sorted = [...vs].sort((a, b) => (order[a.ev.s] - order[b.ev.s]) || (b.ev.rep - a.ev.rep));
   const tracked = sorted.filter(v => v.ev.s !== S.NOT);
+  const reviewed = sorted.filter(v => isRelevant(v, v.ev));   // drop payroll, card-only and pure goods vendors
 
   /* ---------------- Sheet 1: 1099 Tracker ---------------- */
   const ws = wb.addWorksheet('1099 Tracker', { views: [{ state: 'frozen', xSplit: 1, ySplit: HR, showGridLines: false }], properties: { tabColor: argb(C.teal) } });
@@ -47,7 +48,7 @@ export async function buildTrackerXlsx(c, vs, opts = {}) {
   ws.getCell(1, 1).value = `${c.name}  —  1099 W-9 Tracker`;
   ws.getCell(1, 1).font = { name: FONT, size: 18, bold: true, color: argb(C.navy) };
   ws.getCell(1, 9).value = 'Enduring Planet'; ws.getCell(1, 9).font = { name: FONT, size: 12, bold: true, color: argb(C.teal) };
-  ws.getCell(2, 1).value = `Tax year ${c.taxYear}   ·   Sender: ${c.senderName || '—'} ${c.senderEmail ? '<' + c.senderEmail + '>' : ''}   ·   1099s due to vendors and IRS by January 31, ${c.taxYear + 1}   ·   Exported ${new Date().toLocaleDateString('en-US')}`;
+  ws.getCell(2, 1).value = `Tax year ${c.taxYear}   ·   Sender: ${c.senderName || '—'} ${c.senderEmail ? '<' + c.senderEmail + '>' : ''}   ·   1099s due to vendors and IRS by ${filingDue(c.taxYear)}   ·   Exported ${new Date().toLocaleDateString('en-US')}`;
   ws.getCell(2, 1).font = { name: FONT, size: 10, color: argb(C.sub) };
   ws.getRow(1).height = 32; ws.getRow(2).height = 20; ws.getRow(3).height = 8;
 
@@ -68,7 +69,7 @@ export async function buildTrackerXlsx(c, vs, opts = {}) {
   kpis.forEach((k, i) => {
     const lab = ws.getCell(4, i + 1), val = ws.getCell(5, i + 1);
     lab.value = k[0]; lab.font = { name: FONT, size: 9, bold: true, color: argb(C.navy) };
-    val.value = k[1] ? { formula: k[1], result: results[i] } : vs.length;
+    val.value = k[1] ? { formula: k[1], result: results[i] } : (opts.paid ?? vs.length);
     val.font = { name: FONT, size: 20, bold: true, color: argb(k[3]) };
     const g = { style: 'thin', color: argb(C.teal) };
     lab.fill = fill(C.mint); val.fill = fill(C.white);
@@ -128,16 +129,16 @@ export async function buildTrackerXlsx(c, vs, opts = {}) {
   ].forEach((cf, i) => { cf.rules[0].priority = i + 1; ws.addConditionalFormatting(cf); });
 
   /* ---------------- Sheet 2: All vendors ---------------- */
-  const all = wb.addWorksheet('All vendors', { views: [{ state: 'frozen', ySplit: 1, showGridLines: false }], properties: { tabColor: argb(C.teal) } });
-  all.columns = [{ header: 'Vendor', width: 34 }, { header: 'Total paid ($)', width: 14 }, { header: 'Card / PayPal ($)', width: 15 }, { header: 'Reportable ($)', width: 14 },
+  const all = wb.addWorksheet('Reviewed vendors', { views: [{ state: 'frozen', ySplit: 1, showGridLines: false }], properties: { tabColor: argb(C.teal) } });
+  all.columns = [{ header: 'Vendor', width: 34 }, { header: 'Paid from bank + card ($)', width: 18 }, { header: 'Card ($)', width: 12 }, { header: 'Reportable ($)', width: 14 },
     { header: '1099 Status', width: 14 }, { header: 'Form / Box', width: 13 }, { header: 'Entity Type', width: 22 }, { header: 'Why', width: 80 }];
   all.getRow(1).eachCell(x => { x.font = { name: FONT, bold: true, color: argb(C.navy) }; x.fill = fill(C.teal); });
-  sorted.forEach(v => all.addRow([v.n, v.t, v.x, Math.round(v.ev.rep * 100) / 100, v.ev.s, v.ev.fb || '—', v.e || 'Unknown', v.ev.why]));
+  reviewed.forEach(v => all.addRow([v.n, v.t, v.x, Math.round(v.ev.rep * 100) / 100, v.ev.s, v.ev.fb || '—', v.e || 'Unknown', v.ev.why]));
   [2, 3, 4].forEach(i => { all.getColumn(i).numFmt = '$#,##0'; });
   all.getColumn(8).alignment = { wrapText: true, vertical: 'top' };
-  all.autoFilter = { from: 'A1', to: { row: Math.max(1, sorted.length + 1), column: 8 } };
+  all.autoFilter = { from: 'A1', to: { row: Math.max(1, reviewed.length + 1), column: 8 } };
   ['Eligible', 'Needs W-9', 'Needs review', 'Not eligible'].forEach((t, i) => all.addConditionalFormatting(
-    { ref: `E2:E${sorted.length + 1}`, rules: [{ type: 'expression', priority: i + 1, formulae: [`ISNUMBER(SEARCH("${t}",$E2))`],
+    { ref: `E2:E${reviewed.length + 1}`, rules: [{ type: 'expression', priority: i + 1, formulae: [`ISNUMBER(SEARCH("${t}",$E2))`],
       style: { fill: cfFill([C.green, C.yellow, C.orange, C.grey][i]), font: { color: argb([C.greenInk, C.yellowInk, C.orangeInk, C.greyInk][i]), bold: true } } }] }));
 
   /* ---------------- Sheet 3: How to use ---------------- */
@@ -145,7 +146,8 @@ export async function buildTrackerXlsx(c, vs, opts = {}) {
   h.getColumn(1).width = 110;
   [
     [`${c.name} — how to use this tracker`, 16, true],
-    ['1. “1099 Tracker” lists every vendor that needs a 1099 (or needs review). “All vendors” lists everyone paid, with the reason.', 11],
+    ['1. “1099 Tracker” lists every vendor that needs a 1099 (or needs review). “Reviewed vendors” lists every vendor paid for services, rent or legal work, with the reason it is or is not reportable. Payroll, card-only and goods vendors are left out.', 11],
+    ['Amounts are CASH BASIS: only payments that left a bank account in the tax year. Unpaid bills, accruals and payroll journals are not counted.', 11],
     ['2. Update the W-9 Status dropdown as you go: To request → Emailed → Follow-up 1/2 → Received → Verified. The counts at the top update by themselves.', 11],
     ['3. Put the date you emailed in “Last Emailed”. “Next Follow-up” fills in, and the vendor turns orange when a follow-up is due (7 days).', 11],
     ['4. To email vendors: in the EP 1099 Tool click “Send to email tracker”, then in the EP 1099 Email Tracker Google Sheet click the green “Create W-9 drafts” button. Drafts land in the sender’s Gmail.', 11],

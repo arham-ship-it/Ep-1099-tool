@@ -111,3 +111,42 @@ test('QuickBooks Online GL with "Distribution account" column and revenue accoun
   assert.equal(v['ramp dev'].x, 9000);                         // paid on Divvy card
   assert.equal(v['brix law'], undefined);                      // 2025 line ignored for 2026
 });
+
+test('cash basis: only bank payments count; unpaid bills, payroll journals and card payments do not', async () => {
+  const { prepareSheet, isLedger, guessEntity, acctKind } = await import('../src/logic.js');
+  const H = ['', 'Distribution account', 'Transaction date', 'Transaction type', 'Num', 'Name', 'Description', 'Split', 'Amount', 'Balance'];
+  const AP = '21000 Accounts Payable (A/P)', BANK = '10010 Chase Checking', CARD = '20300 Brex Credit Card';
+  const L = (acct, date, type, name, split, amt) => ['', acct, date, type, '', name, '', split, amt, 0];
+  const aoa = [['Test Co'], ['General Ledger'], ['January-October, 2026'], [], H,
+    // Law firm: billed 300k, only 176k paid from the bank
+    L('61255 G&A - Legal Services', '02/01/2026', 'Bill', 'Gish PLLC', AP, 300000), L(AP, '02/01/2026', 'Bill', 'Gish PLLC', '61255 G&A - Legal Services', 300000),
+    L(BANK, '03/01/2026', 'Bill Payment (Check)', 'Gish PLLC', AP, -176000), L(AP, '03/01/2026', 'Bill Payment (Check)', 'Gish PLLC', BANK, -176000),
+    // Contractor billed but never paid
+    L('61160 G&A - Contractors', '09/01/2026', 'Bill', 'Unpaid Person', AP, 9000), L(AP, '09/01/2026', 'Bill', 'Unpaid Person', '61160 G&A - Contractors', 9000),
+    // Contractor paid directly from the bank
+    L('61160 G&A - Contractors', '04/01/2026', 'Expense', 'Jane Doe', BANK, 5000), L(BANK, '04/01/2026', 'Expense', 'Jane Doe', '61160 G&A - Contractors', -5000),
+    // Contractor paid on the credit card
+    L('61160 G&A - Contractors', '04/02/2026', 'Expense', 'Card Guy', CARD, 7000), L(CARD, '04/02/2026', 'Expense', 'Card Guy', '61160 G&A - Contractors', 7000),
+    // Payroll journal entry and payroll provider
+    L('61110 G&A - Salaries & Wages', '04/15/2026', 'Journal Entry', 'Emp Loyee', '', 80000),
+    L('29000 Salaries Payable', '04/15/2026', 'Expense', 'Gusto', BANK, -80000), L(BANK, '04/15/2026', 'Expense', 'Gusto', '29000 Salaries Payable', -80000),
+    // Corporation by name, paid for services
+    L('63121 R&D - Non Recurring Engineering', '05/01/2026', 'Bill', 'E.G.O. North America, Inc.', AP, 30000),
+    L(BANK, '05/20/2026', 'Bill Payment (Check)', 'E.G.O. North America, Inc.', AP, -30000)
+  ];
+  const p = prepareSheet(aoa); const idx = mapHeaders(p.headers);
+  assert.equal(isLedger(p.rows, idx), true);
+  assert.equal(acctKind(BANK), 'bank'); assert.equal(acctKind(CARD), 'card'); assert.equal(acctKind('61265 G&A - Bank Charges & Fees'), 'other');
+  const map = {}; listAccounts(p.rows, idx, 2026, 'Test Co').forEach(a => { const c = suggestCategory(a.an || a.acct); if (c) map[a.co + '|' + a.acct + '|' + a.an] = c; });
+  const v = aggregate(p.rows, idx, 2026, 'Test Co', map).cos['Test Co']; const R = rulesFor(2026);
+  assert.equal(Math.round(v['gish'].c['Legal Services']), 176000);          // paid, not billed
+  assert.equal(Math.round(v['gish'].up), 124000);
+  assert.equal(evaluate(v['unpaid person'], R).s, S.NOT);                        // accrual only
+  assert.equal(evaluate(v['jane doe'], R).s, S.W9);
+  assert.equal(v['card guy'].x, 7000); assert.equal(evaluate(v['card guy'], R).s, S.NOT);
+  assert.equal(v['emp loyee'], undefined);                                       // wages never listed
+  assert.equal(v['gusto'], undefined);                                           // payroll provider never listed
+  assert.equal(guessEntity('E.G.O. North America, Inc.'), 'corp'); assert.equal(guessEntity('Copper Company'), '');
+  assert.equal(evaluate(v['e g o north america'], R).s, S.NOT);                  // IRS name rule
+  assert.equal(guessEntity('Shenzhen Ace Battery Co., Ltd'), 'foreign'); assert.equal(guessEntity('Oregon State University'), 'gov');
+});

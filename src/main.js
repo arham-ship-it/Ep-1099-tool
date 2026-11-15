@@ -3,15 +3,15 @@ import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import {
   RULES, RULES_VERIFIED, CATS, ENTITIES, S, FIELD_LABELS, latestYear, rulesFor, normalizeVendor, fieldKey, slug, cidFor, r2, money,
-  mapHeaders, prepareSheet, listAccounts, yearOf, aggregate, evaluate, w9State, stats, matchByName, suggestCategory
+  mapHeaders, prepareSheet, listAccounts, yearOf, isLedger, isRelevant, filingDue, aggregate, evaluate, w9State, stats, matchByName, suggestCategory
 } from './logic.js';
 import { Store } from './store.js';
 import { loginWithGoogle, logoutUser } from './firebase.js';
-import { readW9, listDriveFiles, downloadDriveFile, sendToSheet, sheetLinks } from './integrations.js';
+import { readW9, listDriveFiles, downloadDriveFile, sendToSheet, sheetLinks, driveCheckLink, fromB64url, researchVendors, RS_LABEL } from './integrations.js';
 import SAMPLE_GL from '../sample/sample_GL_2026.csv?raw';
 
 const SCLASS = { 'Eligible': 's-elig', 'Needs W-9': 's-w9', 'Needs review': 's-rev', 'Not eligible': 's-not' };
-const state = { cid: null, filter: 'all', q: '', clientView: false, teamScope: 'all' };
+const state = { cid: null, filter: 'need', q: '', clientView: false, teamScope: 'all' };
 const $ = id => document.getElementById(id);
 
 /* ------------------------------- helpers ------------------------------- */
@@ -149,7 +149,7 @@ function renderRail() {
   }
 }
 
-function select(cid) { state.cid = cid; state.filter = 'all'; state.q = ''; try { localStorage.setItem('ep1099.cid', cid); } catch { } render(); }
+function select(cid) { state.cid = cid; state.filter = 'need'; state.q = ''; try { localStorage.setItem('ep1099.cid', cid); } catch { } render(); }
 
 function render() {
   if (!state.cid || !Store.clients()[state.cid]) {
@@ -164,7 +164,8 @@ function renderMain() {
   const m = $('main'); const c = state.cid && Store.clients()[state.cid];
   if (!c) { m.innerHTML = emptyHtml(); bindEmpty(); return; }
   const rules = rulesFor(c.taxYear);
-  const vs = vendorList(state.cid).map(v => ({ ...v, ev: evaluate(v, rules) }));
+  const allPaid = vendorList(state.cid).map(v => ({ ...v, ev: evaluate(v, rules) }));
+  const vs = allPaid.filter(v => isRelevant(v, v.ev));   // payroll, card-only and goods vendors are not listed
   vs.forEach(v => v.w = w9State(v, v.ev));
   const st = stats(vs, rules);
   const pct = st.scope ? Math.round(st.rec / st.scope * 100) : 0;
@@ -198,27 +199,28 @@ function renderMain() {
       </div></div>
     <div class="actions">
       <button class="ghost internal" id="aW9" type="button">Upload W-9s</button>
-      <button class="ghost internal" id="aDrive" type="button">Read W-9s from Drive</button>
-      <button class="primary internal" id="aSend" type="button">Send ${st.req} to email tracker</button>
+      <button class="ghost internal" id="aDrive" type="button">Get W-9s from Drive</button>
+      <button class="ghost internal" id="aResearch" type="button">Research vendors online</button>
+      <button class="primary internal" id="aSend" type="button">Send ${st.scope} to email tracker</button>
       <button class="ghost" id="aView" type="button">${cv ? 'Back to full tracker' : 'Client view'}</button>
       <button class="ghost" id="aXlsx" type="button">Download tracker (Excel)</button>
       <button class="ghost internal" id="aCsv" type="button">Export CSV</button>
       <button class="ghost internal" id="aDel" type="button">Delete</button>
     </div></div></section>
   <section class="kpis">
-    <div class="kpi"><span class="v num">${st.paid}</span><span class="l">Vendors paid in ${c.taxYear}</span></div>
+    <div class="kpi"><span class="v num">${allPaid.length}</span><span class="l">Vendors paid in ${c.taxYear} · ${vs.length} reviewed for 1099</span></div>
     <div class="kpi k-elig"><span class="v num">${st.scope}</span><span class="l">Need a 1099 (${st.elig} confirmed, ${st.needs} pending W-9)</span></div>
     <div class="kpi k-rec"><span class="v num">${st.rec}</span><span class="l">W-9s received</span></div>
     <div class="kpi k-req"><span class="v num">${st.req}</span><span class="l">W-9s to request</span></div>
     <div class="kpi k-trk"><span class="v num">${st.trk}</span><span class="l">Requested via email tracker</span></div>
   </section>
   <section class="card progress">
-    <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><h3 style="font-size:15px">W-9 collection: ${pct}% complete</h3><span class="note">1099s due to vendors and the IRS by January 31, ${c.taxYear + 1}</span></div>
+    <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><h3 style="font-size:15px">W-9 collection: ${pct}% complete</h3><span class="note">1099s due to vendors and the IRS by ${filingDue(c.taxYear)}</span></div>
     ${segBar(st)}
     <div class="legend"><span><i style="background:var(--ok)"></i>Received ${st.rec}</span><span><i style="background:var(--info)"></i>Requested ${st.trk}</span><span><i style="background:var(--bad)"></i>To request ${st.req}</span>${st.rev ? `<span><i style="background:var(--risk)"></i>${st.rev} need review</span>` : ''}</div>
   </section>
   <section style="display:flex;flex-direction:column;gap:10px">
-    <div class="filters">${chip('all', 'All', vs.length)}${chip('need', 'Need 1099', st.scope)}${chip('req', 'To request', st.req)}${chip('rec', 'W-9 received', st.rec)}${chip('rev', 'Needs review', st.rev)}${chip('not', 'Not eligible', st.paid - st.scope - st.rev)}
+    <div class="filters">${chip('all', 'All reviewed', vs.length)}${chip('need', 'Need 1099', st.scope)}${chip('req', 'To request', st.req)}${chip('rec', 'W-9 received', st.rec)}${chip('rev', 'Needs review', st.rev)}${chip('not', 'Not eligible', st.paid - st.scope - st.rev)}
       <input class="search" id="q" placeholder="Search vendor" value="${esc(state.q)}" aria-label="Search vendor"></div>
     <div class="tablewrap"><table>
       <thead><tr><th>Vendor</th><th style="text-align:right">Reportable</th><th>1099 status</th><th>Form / box</th><th>Why</th><th>W-9</th><th class="internal">Entity type (from W-9)</th><th class="internal">Contact</th></tr></thead>
@@ -226,7 +228,7 @@ function renderMain() {
     </table></div>
     <p class="note">Status colors: <span class="pill s-elig">Eligible</span> <span class="pill s-w9">Needs W-9</span> <span class="pill s-rev">Needs review</span> <span class="pill s-not">Not eligible</span> · Rules: tax year ${c.taxYear}${RULES[c.taxYear] ? '' : ' (latest rules — verify the inflation-adjusted threshold)'} · verified ${RULES_VERIFIED}</p>
   </section>`;
-  bindMain(c, vs);
+  bindMain(c, vs, allPaid.length);
 }
 
 function rowHtml(v) {
@@ -242,14 +244,14 @@ function rowHtml(v) {
     <td class="amt num">${money(ev.rep)}${v.x ? `<div class="sub">${money(v.x)} card</div>` : ''}</td>
     <td><span class="pill ${SCLASS[ev.s]}">${ev.s}</span></td>
     <td class="num">${esc(ev.fb) || '—'}</td>
-    <td class="reason">${esc(ev.why)}</td>
+    <td class="reason">${esc(ev.why)}${v.rs && v.rs.k !== 'unknown' ? `<div class="sub" style="margin-top:4px"><b>Online check:</b> ${esc(RS_LABEL[v.rs.k])} (${esc(v.rs.c)} confidence) — ${esc(v.rs.note)}</div>` : ''}</td>
     <td>${w}${toggle}</td>
     <td class="internal"><select data-ent="${v.fk}" aria-label="Entity type for ${esc(v.n)}">${ENTITIES.map(e => `<option ${((v.e || 'Unknown') === e) ? 'selected' : ''}>${e}</option>`).join('')}</select></td>
     <td class="internal" style="min-width:190px"><input data-cn="${v.fk}" placeholder="Contact name" value="${esc(v.cn || '')}" aria-label="Contact name"><input data-ce="${v.fk}" placeholder="email@vendor.com" value="${esc(v.ce || '')}" style="margin-top:4px" aria-label="Contact email"></td>
   </tr>`;
 }
 
-function bindMain(c, vs) {
+function bindMain(c, vs, paidCount) {
   const m = $('main'); const cid = state.cid;
   m.querySelectorAll('.chip').forEach(b => b.onclick = () => { state.filter = b.dataset.f; renderMain(); });
   const q = m.querySelector('#q'); q.oninput = debounce(() => { state.q = q.value; renderMain(); const nq = $('q'); nq.focus(); nq.setSelectionRange(nq.value.length, nq.value.length); }, 250);
@@ -272,15 +274,16 @@ function bindMain(c, vs) {
 
   [['cDrive', 'driveUrl'], ['cSName', 'senderName'], ['cSEmail', 'senderEmail']].forEach(([id, f]) => { const el = m.querySelector('#' + id); el.onchange = () => Store.putClient(cid, { [f]: el.value.trim() }); });
   m.querySelector('#aW9').onclick = () => $('w9File').click();
-  m.querySelector('#aDrive').onclick = () => readFromDrive(c);
-  m.querySelector('#aSend').onclick = () => openSend(c, vs);
+  m.querySelector('#aDrive').onclick = () => getW9sFromDrive(c, vs);
+  m.querySelector('#aResearch').onclick = e => research(c, vs, e.currentTarget);
+  m.querySelector('#aSend').onclick = () => openSend(c, vs, paidCount);
   m.querySelector('#aView').onclick = () => { state.clientView = !state.clientView; renderMain(); };
   m.querySelector('#aCsv').onclick = () => exportCsv(c, vs);
   m.querySelector('#aXlsx').onclick = async e => {
     const b = e.currentTarget; b.disabled = true; b.textContent = 'Building…';
     try {
       const { buildTrackerXlsx } = await import('./trackerXlsx.js');
-      const blob = await buildTrackerXlsx(c, vs, { assignee: c.assignedToName || c.assignedTo || '' });
+      const blob = await buildTrackerXlsx(c, vs, { assignee: c.assignedToName || c.assignedTo || '', paid: paidCount });
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
       a.download = `${slug(c.name)}-1099-tracker-${c.taxYear}.xlsx`; a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 3000);
@@ -332,6 +335,7 @@ function renderImport() {
   if (imp.step === 1) {
     const opt = k => `<select id="m_${k}"><option value="">— not in file —</option>${imp.headers.map((h, i) => `<option value="${i}" ${imp.idx[k] === i ? 'selected' : ''}>${esc(h)}</option>`).join('')}</select>`;
     body = `<p class="note"><b>${esc(imp.name)}</b> · ${imp.rows.length.toLocaleString()} transaction lines. Check that each field points at the right column.</p>
+      ${isLedger(imp.rows, imp.idx) ? '<p class="okbox"><b>Full ledger detected — cash basis.</b> Only payments that left a bank account count. Unpaid bills, payroll journal entries and credit-card payments are ignored.</p>' : ''}
       ${imp.grouped ? '<p class="okbox">Report-style ledger detected (QuickBooks/Xero): account headings were copied onto each transaction as “Account Name”, and Total / Beginning Balance rows were skipped.</p>' : ''}
       <div class="grid2">${Object.keys(FIELD_LABELS).map(k => `<label class="field">${FIELD_LABELS[k]}${k === 'vendor' ? ' *' : ''}${opt(k)}</label>`).join('')}
       <label class="field">Tax year<select id="m_year">${Object.keys(RULES).map(y => `<option ${+y === imp.taxYear ? 'selected' : ''}>${y}</option>`).join('')}<option>${latestYear() + 1}</option></select></label>
@@ -380,9 +384,10 @@ function runImport() {
     for (const key in cos[co]) {
       const a = cos[co][key]; const fk = fieldKey(key); const o = old[fk] || {};
       out[fk] = { n: a.n, k: a.k, t: r2(a.t), x: r2(a.x), c: Object.fromEntries(Object.entries(a.c).map(([k, v]) => [k, r2(v)])), u: r2(a.u), ua: a.ua, nr: a.nr,
-        e: o.e || 'Unknown', cn: o.cn || '', ce: o.ce || '', w9: o.w9 || null, rq: o.rq || null };
+        up: r2(a.up || 0), cash: a.cash || 0,
+        e: o.e || 'Unknown', cn: o.cn || '', ce: o.ce || '', w9: o.w9 || null, rq: o.rq || null, rs: o.rs || null };
     }
-    for (const fk in old) if (fk.startsWith('v_') && !out[fk] && old[fk].w9 && old[fk].w9.on) out[fk] = { ...old[fk], t: 0, x: 0, c: {}, u: 0, ua: [], nr: [] };
+    for (const fk in old) if (fk.startsWith('v_') && !out[fk] && old[fk].w9 && old[fk].w9.on) out[fk] = { ...old[fk], t: 0, x: 0, c: {}, u: 0, ua: [], nr: [], up: 0, cash: 0 };
     const prev = Store.clients()[cid] || {};
     const accountMap = { ...(prev.accountMap || {}) };
     imp.accounts.filter(a => a.co === co && a.cat).forEach(a => accountMap[a.acct + '|' + a.an] = a.cat);
@@ -399,104 +404,142 @@ function runImport() {
 /* ------------------------------- W-9s ------------------------------- */
 let w9q = [];
 async function expandFiles(files) {
-  const out = [];
+  const list = [];
   for (const f of files) {
     if (/\.zip$/i.test(f.name)) {
-      try {
-        const zip = await JSZip.loadAsync(await f.arrayBuffer());
-        for (const [p, zf] of Object.entries(zip.files)) {
-          if (zf.dir || !/\.(pdf|png|jpe?g)$/i.test(p)) continue;
-          out.push(new File([await zf.async('blob')], p.split('/').pop(), { type: p.endsWith('.pdf') ? 'application/pdf' : 'image/jpeg' }));
-        }
-      } catch (e) { toast('Couldn’t unzip ' + f.name + ': ' + e.message); }
-    } else out.push(f);
+      const z = await JSZip.loadAsync(await f.arrayBuffer());
+      for (const name of Object.keys(z.files)) {
+        const zf = z.files[name]; if (zf.dir || !/\.(pdf|png|jpe?g)$/i.test(name)) continue;
+        const base = name.split('/').pop();
+        list.push(new File([await zf.async('blob')], base, { type: /pdf$/i.test(base) ? 'application/pdf' : (/png$/i.test(base) ? 'image/png' : 'image/jpeg') }));
+      }
+    } else list.push(f);
   }
-  return out;
+  return list;
 }
-
-function processW9s(files) {
+async function processW9s(files) {
+  if (!files.length) return toast('No PDF or image files found.');
   const vs = vendorList(state.cid);
-  w9q = files.map(f => {
-    const raw = f.name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ').replace(/\bw9\b/gi, '').trim();
-    const match = matchByName(raw, vs);
-    return { f, name: f.name, st: 'Queued', match, x: null, note: '' };
-  });
-  renderW9(); readQueue();
-}
-
-function renderW9() {
-  const vs = vendorList(state.cid);
-  const rows = w9q.map((it, i) => `<tr>
-    <td><b>${esc(it.name)}</b>${it.note ? `<div class="sub">${esc(it.note)}</div>` : ''}</td>
-    <td><select data-wi="${i}"><option value="">— choose vendor —</option>${vs.map(v => `<option value="${v.fk}" ${it.match === v.fk ? 'selected' : ''}>${esc(v.n)}</option>`).join('')}</select></td>
-    <td>${it.x ? `<span class="pill s-elig">${esc(it.x.tax_classification || 'Read')}</span> ${it.x.tin_last4 ? `TIN •••${esc(it.x.tin_last4)}` : ''}` : esc(it.st)}</td>
-  </tr>`).join('');
-  const md = modal(`<div class="phead"><h2>Match W-9 files (${w9q.length})</h2><button class="ghost" id="wClose" type="button">Close</button></div>
-    <p class="note">Each file is matched to a vendor by name. Change the dropdown if the match looks wrong. Never stores full SSN/EIN — only last 4 digits.</p>
-    <div class="tablewrap" style="max-height:55vh;overflow:auto"><table style="min-width:580px"><thead><tr><th>File</th><th>Vendor</th><th>Extracted</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="pfoot"><button class="ghost" id="wCancel" type="button">Cancel</button><button class="primary" id="wSave" type="button">Apply to tracker</button></div>`, 'Match W-9s');
-  md.querySelector('#wClose').onclick = closeModal;
-  md.querySelector('#wCancel').onclick = closeModal;
-  md.querySelectorAll('[data-wi]').forEach(s => s.onchange = () => w9q[+s.dataset.wi].match = s.value);
-  md.querySelector('#wSave').onclick = () => {
-    const cid = state.cid; let applied = 0;
-    for (const it of w9q) {
-      if (!it.match) continue;
-      const patch = { w9: { on: true, f: it.name, d: new Date().toISOString(), src: it.x ? 'ai' : 'filename', l4: it.x && it.x.tin_last4, ln: it.x && it.x.legal_name } };
-      if (it.x && it.x.tax_classification && ENTITIES.includes(it.x.tax_classification)) patch.e = it.x.tax_classification;
-      Store.patchVendor(cid, it.match, patch); applied++;
-    }
-    closeModal(); toast(`Saved W-9 on ${applied} vendor(s)`);
-  };
-}
-
-async function readQueue() {
-  const vs = vendorList(state.cid);
+  w9q = files.map(f => ({ f, match: matchByName(f.name.replace(/\.[^.]+$/, ''), vs), x: null, st: 'Waiting' }));
+  renderW9();
   for (const it of w9q) {
     it.st = 'Reading…'; renderW9();
     const r = await readW9(it.f, Store.settings());
     it.x = r.x; it.note = r.note;
     if (!it.match && it.x) it.match = matchByName(it.x.legal_name || '', vs) || matchByName(it.x.business_name || '', vs);
-    it.st = it.x ? 'Done' : (it.note || 'Done');
-    renderW9();
+    it.st = 'Ready'; renderW9();
   }
 }
-
 async function readFromDrive(c) {
-  if (!c.driveUrl) return toast('Paste the client’s W-9 Drive folder link first.');
   const s = Store.settings();
-  if (!s.googleClientId) return toast('Add your Google OAuth Client ID in Settings first (see README).');
   try {
     toast('Signing in to Google…');
     const files = await listDriveFiles(c.driveUrl, s.googleClientId);
-    if (!files.length) return toast('No PDF or image files found in that Drive folder.');
-    toast(`Found ${files.length} file(s). Downloading…`);
-    const blobs = [];
-    for (const df of files) {
-      const b = await downloadDriveFile(df.id);
-      blobs.push(new File([b], df.name, { type: df.mimeType }));
+    if (!files.length) return toast('No PDF or image files in that folder.');
+    toast(`Downloading ${files.length} files…`);
+    const out = [];
+    for (const f of files) out.push(await downloadDriveFile(f, s.googleClientId));
+    processW9s(out);
+  } catch (e) { toast(e.message); }
+}
+/** "Get W-9s from Drive": through the Sheet (no setup) by default; through Google sign-in when a Client ID is set (also reads the forms). */
+function getW9sFromDrive(c, vs) {
+  if (!c.driveUrl) return toast('Paste the client’s W-9 Drive folder link on this tracker first.');
+  const s = Store.settings();
+  const names = vs.filter(v => (v.ev.s === S.ELIG || v.ev.s === S.W9) && v.w !== 'rec').map(v => v.n);
+  const viaSheet = s.sheetUrl ? driveCheckLink(s, c.name, c.driveUrl, names, location.origin + location.pathname) : '';
+  const md = modal(`<div class="phead"><h2>Get W-9s from Drive</h2><button class="ghost" id="dClose" type="button">Close</button></div>
+    <p class="note">Looks in <a href="${esc(c.driveUrl)}" target="_blank" rel="noopener">the client’s W-9 folder</a> (subfolders included) for a file named after each of the ${names.length} vendors that still need a W-9.</p>
+    <div class="actions">
+      ${viaSheet ? `<a class="primary" style="text-decoration:none;display:inline-block" href="${esc(viaSheet)}" target="_blank" rel="noopener" id="dSheet">Check the Drive folder</a>` : '<p class="warnbox">Connect the Google Sheet email tracker in Settings first.</p>'}
+      ${s.googleClientId ? '<button class="ghost" id="dOauth" type="button">Download and read the forms (entity type, TIN last 4)</button>' : ''}
+    </div>
+    <p class="note">A new tab lists the W-9s found. Click <b>Save these W-9s in the EP 1099 Tool</b> there and they are marked as received here and in the email tracker — those vendors will not be emailed.
+    Files are matched by name, so name them like “Vendor Name W-9.pdf”. The folder must be shared with your Google account.</p>`, 'Get W-9s from Drive');
+  md.querySelector('#dClose').onclick = closeModal;
+  const o = md.querySelector('#dOauth'); if (o) o.onclick = () => { closeModal(); readFromDrive(c); };
+}
+/** Coming back from the Sheet's Drive check: #w9=<base64 {c, m:[[vendor, file, url]]}> */
+function importDriveResult() {
+  const m = location.hash.match(/^#w9=(.+)$/); if (!m) return;
+  try {
+    const data = JSON.parse(fromB64url(decodeURIComponent(m[1])));
+    history.replaceState(null, '', location.pathname + location.search);
+    const cid = Object.keys(Store.clients()).find(id => Store.clients()[id].name === data.c);
+    if (!cid) return toast('W-9 results came back for “' + data.c + '”, but that company isn’t in this browser.');
+    const byName = {}; vendorList(cid).forEach(v => { byName[v.n.toLowerCase()] = v; });
+    let n = 0;
+    for (const [name, file, url] of data.m || []) {
+      const v = byName[String(name).toLowerCase()]; if (!v) continue;
+      Store.patchVendor(cid, v.fk, { w9: { ...(v.w9 || {}), on: true, f: file, url, d: new Date().toISOString(), src: 'drive' } }); n++;
     }
-    processW9s(blobs);
-  } catch (err) { toast('Drive error: ' + err.message); }
+    state.cid = cid; state.filter = 'rec';
+    toast(`${n} W-9${n === 1 ? '' : 's'} from Drive saved for ${data.c}. Set each vendor’s entity type from its W-9.`);
+  } catch (e) { toast('Couldn’t read the W-9 results: ' + e.message); }
+}
+/** Quick online check of what each "Needs W-9" vendor is (corporation, foreign, government…). */
+async function research(c, vs, btn) {
+  const s = Store.settings();
+  if (!s.geminiKey) return toast('Add a free Gemini API key in Settings (aistudio.google.com) to research vendors online.');
+  const todo = vs.filter(v => v.ev.s === S.W9 && !(v.w9 && v.w9.on) && !v.rs);
+  if (!todo.length) return toast('Every vendor that needs a W-9 has already been researched.');
+  btn.disabled = true; let done = 0, changed = 0;
+  try {
+    for (let i = 0; i < todo.length; i += 8) {
+      const batch = todo.slice(i, i + 8);
+      btn.textContent = `Researching ${Math.min(i + 8, todo.length)} of ${todo.length}…`;
+      const res = await researchVendors(batch.map(v => ({ name: v.n, hint: Object.keys(v.c || {}).filter(k => k !== 'Not Reportable').join(', ') })), c.name, s);
+      res.forEach((r, j) => { Store.patchVendor(state.cid, batch[j].fk, { rs: { k: r.k, c: r.c, note: r.note, d: new Date().toISOString() } }); done++;
+        if (r.c !== 'low' && /us_corporation|foreign|government|nonprofit/.test(r.k)) changed++; });
+    }
+    toast(`${done} vendors researched — ${changed} look exempt or foreign. Check the “Online check” notes; the W-9 is still the proof.`);
+  } catch (e) { toast('Research stopped: ' + e.message); }
+}
+function renderW9() {
+  const vs = vendorList(state.cid).sort((a, b) => a.n.localeCompare(b.n));
+  const ready = w9q.every(i => i.st === 'Ready');
+  const md = modal(`<div class="phead"><h2>W-9s for ${esc(Store.clients()[state.cid].name)}</h2><button class="ghost" id="wClose" type="button">Close</button></div>
+    <p class="note">Each file is matched to a vendor by file name, then by the name on the form. Check the match and entity type, then save. Only the last 4 digits of the TIN are kept.</p>
+    <div class="tablewrap" style="max-height:60vh;overflow:auto"><table style="min-width:760px"><thead><tr><th>File</th><th>Read from form</th><th>Vendor</th><th>Entity type</th></tr></thead><tbody>
+    ${w9q.map((it, i) => `<tr><td>${esc(it.f.name)}<div class="sub">${it.st}</div></td>
+      <td class="reason">${it.x ? `${esc(it.x.legal_name || '')}${it.x.business_name ? ' / ' + esc(it.x.business_name) : ''}${it.x.tin_last4 ? '<br>TIN •••' + esc(it.x.tin_last4) : ''}${it.x.from ? `<br><span class="sub">via ${esc(it.x.from)}</span>` : ''}${it.x.is_w9 === false ? '<br><b>This may not be a W-9.</b>' : ''}` : esc(it.note || '—')}</td>
+      <td><select data-wm="${i}" aria-label="Vendor"><option value="">— skip this file —</option>${vs.map(v => `<option value="${v.fk}" ${it.match === v.fk ? 'selected' : ''}>${esc(v.n)}</option>`).join('')}</select></td>
+      <td><select data-we="${i}" aria-label="Entity">${ENTITIES.map(e => `<option ${((it.x && it.x.entity_type) || 'Unknown') === e ? 'selected' : ''}>${e}</option>`).join('')}</select></td></tr>`).join('')}
+    </tbody></table></div>
+    <div class="pfoot"><button class="primary" id="wSave" type="button" ${ready ? '' : 'disabled'}>${ready ? 'Save W-9s' : 'Reading files…'}</button></div>`, 'Upload W-9s');
+  md.querySelector('#wClose').onclick = closeModal;
+  md.querySelectorAll('[data-wm]').forEach(s => s.onchange = () => w9q[+s.dataset.wm].match = s.value);
+  md.querySelectorAll('[data-we]').forEach(s => s.onchange = () => { const it = w9q[+s.dataset.we]; it.x = { ...(it.x || {}), entity_type: s.value }; });
+  md.querySelector('#wSave').onclick = () => {
+    let n = 0;
+    for (const it of w9q) {
+      if (!it.match) continue; const x = it.x || {};
+      Store.patchVendor(state.cid, it.match, { e: x.entity_type || 'Unknown', w9: { on: true, f: it.f.name, d: new Date().toISOString(), ln: x.legal_name || '', l4: String(x.tin_last4 || '').slice(-4), src: 'upload' } });
+      n++;
+    }
+    closeModal(); toast(`${n} W-9${n === 1 ? '' : 's'} saved`);
+  };
 }
 
 /* --------------------------- email tracker --------------------------- */
-function openSend(c, vs) {
-  const rows = vs.filter(v => v.w === 'req');
+function openSend(c, vs, paidCount) {
+  const rows = vs.filter(v => v.ev.s === S.ELIG || v.ev.s === S.W9);
+  const toAsk = rows.filter(v => v.w !== 'rec');
+  const meta = { paid: paidCount || vs.length, folder: c.driveUrl || '' };
   const s = Store.settings();
-  const payload = rows.map(v => [v.n, v.cn || '', v.ce || '', r2(v.ev.rep), v.ev.fb, v.ev.s]);
+  const payload = rows.map(v => [v.n, v.cn || '', v.ce || '', r2(v.ev.rep), v.ev.fb, v.ev.s, v.w === 'rec' ? 1 : 0]);
   const sender = [c.senderName || '', c.senderEmail || ''];
-  const missing = rows.filter(v => !v.ce).length;
+  const missing = toAsk.filter(v => !v.ce).length;
   // Company (Workspace) deployments only accept signed-in browsers, so the link is the way to send.
   const domainOnly = /\/a\/macros\//.test(s.sheetUrl || '');
-  const links = s.sheetUrl && rows.length ? sheetLinks(s, c.name, c.taxYear, sender, payload) : [];
+  const links = s.sheetUrl && rows.length ? sheetLinks(s, c.name, c.taxYear, sender, payload, meta) : [];
   const linkHtml = links.map((u, i, all) => `<a class="primary" data-link="${i}" style="text-decoration:none;display:inline-block" href="${esc(u.url)}" target="_blank" rel="noopener">${all.length > 1 ? `Send part ${i + 1} of ${all.length} (${u.n} vendors)` : `Send ${u.n} vendors to the email tracker`}</a>`).join(' ');
   let action = '';
   if (!s.sheetUrl) action = '<p class="warnbox">Connect your Google Sheet email tracker first (Settings, top right).</p>';
   else if (!rows.length) action = '<p class="okbox">Nothing to send — every vendor that needs a 1099 has a W-9 or is already in the tracker.</p>';
   else action = domainOnly ? linkHtml : `<button class="primary" id="sPost" type="button">Send ${rows.length} vendors to the email tracker</button>`;
   const md = modal(`<div class="phead"><h2>Send to email tracker</h2><button class="ghost" id="sClose" type="button">Close</button></div>
-    <p class="note">${rows.length} vendor${rows.length === 1 ? '' : 's'} from <b>${esc(c.name)}</b> still need a W-9. They go to the <b>${esc(c.name)}</b> tab of the EP 1099 Email Tracker Sheet. Then the sender clicks the green <b>Create W-9 drafts</b> button on that tab — drafts land in their Gmail; nothing is sent automatically.</p>
+    <p class="note">${rows.length} vendor${rows.length === 1 ? '' : 's'} from <b>${esc(c.name)}</b> need a 1099: ${rows.length - toAsk.length} already have a W-9 and ${toAsk.length} still need one. All of them go to the <b>${esc(c.name)}</b> tab of the EP 1099 Email Tracker Sheet. Then the sender clicks the green <b>Create W-9 drafts</b> button on that tab — drafts land in their Gmail; nothing is sent automatically.</p>
     <p class="note">Sender: <b>${esc(c.senderName || 'not set')}</b> &lt;${esc(c.senderEmail || 'not set')}&gt;${!c.senderEmail ? ' — set it first so drafts land in the right Gmail.' : ''}${missing ? ` · ${missing} without a contact email (add it here or in the Sheet).` : ''}</p>
     <div class="actions">${action}</div>
     ${domainOnly && rows.length ? '<p class="note">A new tab opens and says “Added to the email tracker”. Then come back and click the button below.</p>' : ''}
@@ -506,16 +549,16 @@ function openSend(c, vs) {
       <button class="ghost" id="sCopy" type="button">Copy ${rows.length} rows</button></details>
     <div class="pfoot"><button class="ghost" id="sMark" type="button" ${rows.length ? '' : 'disabled'}>Done — mark these vendors as requested</button></div>`, 'Send to email tracker');
   md.querySelector('#sClose').onclick = closeModal;
-  const markRequested = () => { const d = new Date().toISOString(); rows.forEach(v => Store.patchVendor(state.cid, v.fk, { rq: { s: 'tracker', d } })); };
+  const markRequested = () => { const d = new Date().toISOString(); toAsk.filter(v => v.w === 'req').forEach(v => Store.patchVendor(state.cid, v.fk, { rq: { s: 'tracker', d } })); };
   md.querySelector('#sMark').onclick = () => { markRequested(); closeModal(); toast(`${rows.length} vendors marked as requested`); };
-  md.querySelectorAll('[data-link]').forEach(a => a.addEventListener('click', () => { a.textContent = 'Opened ↗ — check the new tab'; }));
+  md.querySelectorAll('[data-link]').forEach(a => a.addEventListener('click', () => { a.textContent = 'Opened ✓ — check the new tab'; }));
   const post = md.querySelector('#sPost');
   if (post) post.onclick = async () => {
     post.disabled = true; post.textContent = 'Sending…';
     try {
-      await sendToSheet(s, c.name, c.taxYear, sender, payload);
+      await sendToSheet(s, c.name, c.taxYear, sender, payload, meta);
       markRequested(); closeModal(); toast(`${rows.length} vendors sent — check the ${c.name} tab in your Sheet`);
-    } catch (e) { post.disabled = false; post.textContent = 'Try again'; toast('Couldn’t reach the Sheet: ' + e.message + '. Use "Didn’t arrive?" below.'); }
+    } catch (e) { post.disabled = false; post.textContent = 'Try again'; toast('Couldn’t reach the Sheet: ' + e.message + '. Use “Didn’t arrive?” below.'); }
   };
   md.querySelector('#sCopy').onclick = async () => {
     const tsv = rows.map(v => [c.name, v.n, v.cn || '', v.ce || '', r2(v.ev.rep), v.ev.fb, v.ev.s, c.senderName || '', c.senderEmail || '', c.taxYear].join('\t')).join('\n');
@@ -605,5 +648,16 @@ Store.onAuthChange(user => {
   render();
 });
 
-Store.onChange(render);
+let driveResultChecked = false;
+Store.onChange(() => {
+  if (!driveResultChecked && Object.keys(Store.clients()).length) {
+    driveResultChecked = true;
+    importDriveResult();
+  }
+  render();
+});
+if (!Store.isConfigured()) {
+  driveResultChecked = true;
+  importDriveResult();
+}
 render();

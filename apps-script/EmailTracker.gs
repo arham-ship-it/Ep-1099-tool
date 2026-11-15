@@ -1,5 +1,5 @@
 /******************************************************************************
- * EP 1099 — EMAIL TRACKER (Google Sheets + Apps Script)  v3.1 (EP colours), Nov 2026
+ * EP 1099 — EMAIL TRACKER (Google Sheets + Apps Script)  v4.0 (timeline + management dashboard), Nov 2026
  *
  * The EP 1099 Tool web app finds the 1099 vendors and sends them here.
  * This Sheet is the team's working tracker:
@@ -21,7 +21,7 @@ const COL = {}; CT.forEach(function (h, i) { COL[h] = i + 1; });
 const RQ = { NOT: 'Not sent', DRAFT: 'Draft created', SENT: 'Sent', FU_DRAFT: 'Follow-up draft created',
   FU1: 'Follow-up 1 sent', FU2: 'Follow-up 2 sent', FINAL: 'Final notice sent', RECEIVED: 'W-9 received', DONE: 'Verified' };
 const RQ_LIST = Object.keys(RQ).map(function (k) { return RQ[k]; });
-const W9_LIST = ['No', 'Yes', 'Yes (email) — check file'];
+const W9_LIST = ['No', 'Yes', 'Yes (on file)', 'Yes (Drive)', 'Yes (email) — check file'];
 const IRS_W9 = 'https://www.irs.gov/pub/irs-pdf/fw9.pdf';
 const C = {
   navy: '#1c2a4d', teal: '#00c49a', mint: '#e6f9f4', white: '#ffffff', ink: '#1c2a4d', muted: '#55627d', line: '#d5e6e1', band: '#ffffff',
@@ -29,6 +29,20 @@ const C = {
   green: '#dcf4e8', greenInk: '#11845b', orange: '#ffe3d1', orangeInk: '#b3470e', grey: '#eceff3', greyInk: '#5f6b80'
 };
 const FONT = 'Poppins';
+const VERSION = 'v4.0';
+// Timeline: key, Settings row name, default date. Dates falling on a weekend/holiday move to the next working day.
+const TL = [
+  ['start', 'Timeline: Project start', '2026-11-17'],
+  ['inv', 'Timeline: W-9 inventory target', '2026-11-25'],
+  ['invMax', 'Timeline: W-9 inventory latest', '2026-11-30'],
+  ['email', 'Timeline: Email requests start', '2026-12-01'],
+  ['fu1', 'Timeline: Follow-up 1', '2026-12-04'],
+  ['fu2', 'Timeline: Follow-up 2', '2026-12-08'],
+  ['fu3', 'Timeline: Follow-up 3 (final notice)', '2026-12-11'],
+  ['due', 'Timeline: W-9 collection deadline', '2026-12-15'],
+  ['file', 'Timeline: File 1099s (IRS + vendors)', '2027-01-31']
+];
+const HOLIDAYS_DEFAULT = '2026-11-26, 2026-12-25, 2027-01-01, 2027-01-18';
 
 /* ================================ MENU ==================================== */
 
@@ -42,15 +56,21 @@ function onOpen() {
     .addItem('Follow up on selected row(s)', 'followUpSelected')
     .addItem('Create all my due follow-ups', 'followUpAllDue')
     .addSeparator()
+    .addItem('Check Drive for W-9s (this tab)', 'checkDriveThisTab')
+    .addItem('Check Drive for W-9s (all companies)', 'checkDriveAll')
+    .addItem('Run today’s tasks now (sync, Drive check, due drafts)', 'runTodayTasks')
+    .addSeparator()
+    .addItem('Undo: reset selected rows to Not sent (deletes their drafts)', 'resetSelected')
     .addItem('Sync sent / reply status (mine)', 'syncMine')
     .addItem('Refresh dashboard', 'refreshSummary')
     .addItem('Re-format all company tabs', 'reformatAll')
+    .addItem('Repair this tab (fix broken layout)', 'repairThisTab')
     .addItem('Import pasted rows (Paste_Inbox)', 'importPasted')
     .addSeparator()
     .addSubMenu(ui.createMenu('Setup')
       .addItem('1. Set up this sheet (first time)', 'setupSheet')
       .addItem('Show app key + web app steps', 'showKey')
-      .addItem('Turn on daily email sync (each sender)', 'installDailySync')
+      .addItem('Turn on daily automation (each sender)', 'installDailyAuto')
       .addItem('Turn on weekly IRS rule check (admin)', 'installIrsWatcher')
       .addItem('Check IRS for rule changes now', 'checkIrsUpdates'))
     .addToUi();
@@ -77,6 +97,7 @@ function setupSheet() {
     ['W-9 Save Folder URL', '', 'Drive folder where W-9s that vendors email back are saved (a subfolder per company is created)'],
     ['IRS Watch URLs', 'https://www.irs.gov/instructions/i1099mec, https://www.irs.gov/forms-pubs/about-form-1099-nec, https://www.irs.gov/forms-pubs/about-form-1099-misc', 'Pages checked weekly']
   ]);
+  ensureSettings_(ss);
   ensure_(SYS.TEMPLATES, ['Template', 'Subject', 'Body'], templates_());
   ensure_(SYS.INBOX, ['Company', 'Vendor', 'Contact Name', 'Contact Email', 'Reportable', 'Form / Box', '1099 Status', 'Sender Name', 'Sender Email', 'Tax Year'], []);
   ensure_(SYS.LOG, ['Timestamp', 'User', 'Action', 'Details'], []);
@@ -86,7 +107,7 @@ function setupSheet() {
   if (blank && blank.getLastRow() === 0) ss.deleteSheet(blank);
   ss.setActiveSheet(ss.getSheetByName(SYS.SUMMARY));
   ss.moveActiveSheet(1);
-  log_('Setup', 'Sheet set up (v3)');
+  log_('Setup', 'Sheet set up (' + VERSION + ')');
   showKey();
 }
 
@@ -123,6 +144,7 @@ function doGet(e) {
   const p = (e && e.parameter) || {};
   const props = PropertiesService.getScriptProperties();
   if (!p.k || p.k !== props.getProperty('APP_KEY')) return page_('Not connected', 'The app key is missing or wrong. Copy it from the Sheet’s Settings tab into the EP 1099 Tool.', false);
+  if (p.action === 'w9') return w9Page_(p);
   if (!p.d) return page_('Connected', 'The EP 1099 Tool can send vendors to this email tracker.', true);
   let data;
   try { data = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(p.d)).getDataAsString()); }
@@ -146,8 +168,8 @@ function receive_(data) {
   const lock = LockService.getScriptLock(); lock.waitLock(20000);
   try {
     const res = upsert_(ss, data.c, data.y, data.s || ['', ''], (data.r || []).map(function (r) {
-      return { vendor: r[0], cn: r[1], ce: r[2], amt: r[3], fb: r[4], st: r[5] };
-    }));
+      return { vendor: r[0], cn: r[1], ce: r[2], amt: r[3], fb: r[4], st: r[5], w9: r[6] };
+    }), data.m);
     refreshSummary_(ss);
     log_('From app', data.c + ': ' + res.added + ' added, ' + res.updated + ' updated', ss);
     res.url = ss.getUrl() + '#gid=' + ss.getSheetByName(res.tab).getSheetId();
@@ -163,8 +185,9 @@ function page_(title, msg, ok, url) {
     (url ? '<p><a href="' + url + '" target="_blank">Open the company tab in the email tracker</a></p>' : '') + '</div>').setTitle('EP 1099 email tracker');
 }
 
-function upsert_(ss, company, taxYear, sender, rows) {
+function upsert_(ss, company, taxYear, sender, rows, m) {
   const sh = clientTab_(ss, company, taxYear);
+  if (m) { const mt = meta_(sh); if (m.paid !== undefined) mt.paid = m.paid; if (m.folder) mt.folder = m.folder; setMeta_(sh, mt); }
   const t = read_(sh);
   const byV = {};
   t.rows.forEach(function (r, i) { byV[String(r['Vendor']).trim().toLowerCase()] = i; });
@@ -183,6 +206,10 @@ function upsert_(ss, company, taxYear, sender, rows) {
     if (x.ce && !r['Contact Email']) r['Contact Email'] = x.ce;
     if (sender[0] && !r['Sender Name']) r['Sender Name'] = sender[0];
     if (sender[1] && !r['Sender Email']) r['Sender Email'] = sender[1];
+    if (x.w9 && !/^y/i.test(String(r['W-9 Received']))) {            // the app already has this vendor's W-9
+      r['W-9 Received'] = 'Yes (on file)';
+      if (!r['Request Status'] || r['Request Status'] === RQ.NOT) r['Request Status'] = RQ.RECEIVED;
+    }
   });
   write_(sh, t.rows);
   return { added: added, updated: updated, tab: sh.getName() };
@@ -221,40 +248,57 @@ function clientTab_(ss, company, taxYear) {
 function tabName_(company) { return String(company || 'Company').replace(/[\[\]\*\?\:\/\\']/g, ' ').trim().slice(0, 90); }
 function meta_(sh) {
   const n = String(sh.getRange('A1').getNote() || '');
-  const y = n.match(/Tax year:\s*(\d{4})/), c = n.match(/Company:\s*(.+)/);
-  return { year: y ? y[1] : '', company: c ? c[1].trim() : '' };
+  const g = function (re) { const m = n.match(re); return m ? m[1].trim() : ''; };
+  return { year: g(/Tax year:\s*(\d{4})/), company: g(/Company:\s*(.+)/), paid: g(/Vendors paid:\s*(\d+)/), folder: g(/W-9 folder:\s*(\S+)/), checked: g(/Drive checked:\s*(.+)/) };
 }
-function setMeta_(sh, m) { sh.getRange('A1').setNote('Tax year: ' + m.year + '\nCompany: ' + m.company); }
+function setMeta_(sh, m) {
+  sh.getRange('A1').setNote('Tax year: ' + m.year + '\nCompany: ' + m.company + (m.paid ? '\nVendors paid: ' + m.paid : '') +
+    (m.folder ? '\nW-9 folder: ' + m.folder : '') + (m.checked ? '\nDrive checked: ' + m.checked : ''));
+}
 
 function headerRow_(sh) {
-  if (sh.getLastRow() >= HR && sh.getRange(HR, 1).getValue() === 'Vendor' && sh.getRange(HR, 2).getValue() === 'Reportable') return HR;
-  if (sh.getLastRow() >= 1 && sh.getRange(1, 1).getValue() === 'Vendor' && sh.getRange(1, 2).getValue() === 'Reportable') return 1; // v2 layout
+  const last = Math.min(sh.getLastRow(), 60);
+  if (last < 1) return 0;
+  const a = sh.getRange(1, 1, last, COL['Request Status']).getValues();
+  if (a.length >= HR && a[HR - 1][0] === 'Vendor' && a[HR - 1][COL['Request Status'] - 1] === 'Request Status') return HR;
+  for (let i = 0; i < a.length; i++) if (a[i][0] === 'Vendor' && a[i][COL['Request Status'] - 1] === 'Request Status') return i + 1;
   return 0;
 }
 function isClientTab_(sh) {
   const n = sh.getName();
   if (Object.keys(SYS).map(function (k) { return SYS[k]; }).concat(OLD_SYS).indexOf(n) >= 0) return false;
-  return headerRow_(sh) > 0;
+  return headerRow_(sh) > 0 || /Company:/.test(String(sh.getRange('A1').getNote() || ''));
 }
 function clientTabs_(ss) { return ss.getSheets().filter(isClientTab_); }
 function tabYear_(sh) { return String(meta_(sh).year || setting_('Default Tax Year') || ''); }
 function tabCompany_(sh) { return meta_(sh).company || sh.getName(); }
 
+/**
+ * Reads vendor rows by column position (the column order never changes), wherever they sit on the tab.
+ * This also recovers a tab whose layout was broken (e.g. by Ctrl+Z after a script run).
+ */
 function read_(sh) {
   const hr = headerRow_(sh) || HR;
-  if (sh.getLastRow() <= hr) return { hr: hr, rows: [] };
-  const v = sh.getRange(hr, 1, sh.getLastRow() - hr + 1, CT.length).getValues();
-  const head = v[0].map(String);
-  const rows = v.slice(1).filter(function (r) { return String(r[0]).trim(); }).map(function (r) {
-    const o = {}; head.forEach(function (h, i) { if (h) o[h] = r[i]; }); return o;
-  });
+  const last = sh.getLastRow();
+  if (last < 1) return { hr: hr, rows: [] };
+  const v = sh.getRange(1, 1, last, CT.length).getValues();
+  const seen = {};
+  const rows = v.filter(function (r) {
+    const name = String(r[0]).trim();
+    if (!name || name === 'Vendor') return false;
+    const ok = RQ_LIST.indexOf(String(r[COL['Request Status'] - 1]).trim()) >= 0 || W9_LIST.indexOf(String(r[COL['W-9 Received'] - 1]).trim()) >= 0;
+    if (!ok) return false;
+    const k = name.toLowerCase(); if (seen[k]) return false; seen[k] = 1;  // drop duplicates left by partial undo
+    return true;
+  }).map(function (r) { const o = {}; CT.forEach(function (h, i) { o[h] = r[i]; }); return o; });
   return { hr: hr, rows: rows };
 }
 
 /** Rewrites a company tab in the formatted tracker layout. */
 function write_(sh, rows) {
   const meta = meta_(sh);
-  const days = Number(setting_('Follow-up After (days)')) || 7;
+  const tl = timeline_();
+  const D = function (d) { return 'DATE(' + d.getFullYear() + ',' + (d.getMonth() + 1) + ',' + d.getDate() + ')'; };
   if (sh.getMaxColumns() < CT.length) sh.insertColumnsAfter(sh.getMaxColumns(), CT.length - sh.getMaxColumns());
   const need = HR + rows.length + 5;
   if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
@@ -262,25 +306,26 @@ function write_(sh, rows) {
   all.breakApart(); all.clearContent(); all.clearFormat(); all.clearDataValidations();
   sh.clearConditionalFormatRules();
   all.setFontFamily(FONT).setFontSize(10).setFontColor(C.ink).setVerticalAlignment('middle');
+  sh.getRange(1, 1, 3, CT.length).setWrap(false);
   setMeta_(sh, meta);
 
   // Row 1-2: title band
   sh.getRange(1, 1, 2, CT.length).setBackground(C.white);
   sh.getRange(2, 1, 1, CT.length).setBorder(null, null, true, null, null, null, C.teal, SpreadsheetApp.BorderStyle.SOLID_THICK);
-  sh.getRange(1, 1, 1, 9).merge().setValue((meta.company || sh.getName()) + '  —  1099 W-9 Tracker')
+  sh.getRange(1, 1).setValue((meta.company || sh.getName()) + '  —  1099 W-9 Tracker')
     .setFontSize(18).setFontWeight('bold').setFontColor(C.navy);
-  sh.getRange(2, 1, 1, 9).merge().setValue('Tax year ' + meta.year + '   ·   W-9s due ' + fmt_(setting_('W-9 Due Date')) +
-    '   ·   1099s due to vendors and IRS by January 31, ' + (Number(meta.year) + 1)).setFontSize(10).setFontColor(C.muted);
+  sh.getRange(2, 1).setValue('Tax year ' + meta.year + '   ·   Emails start ' + short_(tl.email) + '   ·   Follow-ups ' + short_(tl.fu1) + ', ' + short_(tl.fu2) + ', ' + short_(tl.fu3) +
+    '   ·   W-9s due ' + short_(tl.due) + '   ·   1099s due ' + short_(tl.file) + ', ' + tl.file.getFullYear()).setFontSize(10).setFontColor(C.muted);
   sh.setRowHeight(1, 40); sh.setRowHeight(2, 24);
   // Row 3: buttons (images); row 4-5: live counts
   sh.setRowHeight(3, 46);
-  sh.getRange(3, 10, 1, 6).merge().setValue('Buttons: select vendor rows first for “Follow up selected”.').setFontSize(9).setFontColor(C.muted).setFontStyle('italic');
+  sh.getRange(3, 12).setValue('Select vendor rows first for “Follow up selected” and “Undo selected”.').setFontSize(9).setFontColor(C.muted).setFontStyle('italic');
   const kpi = [
     ['Vendors', '=COUNTA(A' + (HR + 1) + ':A)', C.band, C.ink],
     ['To email', '=COUNTIF(I' + (HR + 1) + ':I,"' + RQ.NOT + '")', C.red, C.redInk],
     ['Draft ready', '=COUNTIF(I' + (HR + 1) + ':I,"*draft*")', C.yellow, C.yellowInk],
     ['Emailed – waiting', '=COUNTIF(I' + (HR + 1) + ':I,"' + RQ.SENT + '")+COUNTIF(I' + (HR + 1) + ':I,"Follow-up ? sent")+COUNTIF(I' + (HR + 1) + ':I,"' + RQ.FINAL + '")', C.blue, C.blueInk],
-    ['Follow-up due', '=COUNTIFS(K' + (HR + 1) + ':K,"<="&(TODAY()-' + days + '),M' + (HR + 1) + ':M,"No",I' + (HR + 1) + ':I,"<>' + RQ.RECEIVED + '",I' + (HR + 1) + ':I,"<>' + RQ.DONE + '")', C.orange, C.orangeInk],
+    ['Follow-up due', '=' + [tl.fu1, tl.fu2, tl.fu3].map(function (d, i) { return 'IF(TODAY()>=' + D(d) + ',COUNTIFS(J' + (HR + 1) + ':J,' + (i + 1) + ',M' + (HR + 1) + ':M,"No"),0)'; }).join('+'), C.orange, C.orangeInk],
     ['Vendor replied', '=COUNTIF(L' + (HR + 1) + ':L,"Yes*")', C.band, C.ink],
     ['W-9 received', '=COUNTIF(M' + (HR + 1) + ':M,"Yes*")', C.green, C.greenInk],
     ['% complete', '=IF(A5=0,0,G5/A5)', C.green, C.greenInk]
@@ -301,6 +346,7 @@ function write_(sh, rows) {
   // Row 8: headers, row 9+: data
   sh.getRange(HR, 1, 1, CT.length).setValues([CT]).setFontWeight('bold').setFontColor(C.navy).setBackground(C.teal).setWrap(true).setVerticalAlignment('middle');
   sh.setRowHeight(HR, 32);
+  sh.setRowHeights(HR + 1, sh.getMaxRows() - HR, 21);
   if (rows.length) {
     sh.getRange(HR + 1, 1, rows.length, CT.length).setValues(rows.map(function (o) { return CT.map(function (h) { return o[h] === undefined ? '' : o[h]; }); }));
     sh.getRange(HR + 1, 1, rows.length, CT.length).setBorder(null, null, true, null, null, true, C.line, SpreadsheetApp.BorderStyle.SOLID);
@@ -324,26 +370,26 @@ function write_(sh, rows) {
   };
   const r0 = HR + 1;
   sh.setConditionalFormatRules([
-    cf(due, '=AND($A' + r0 + '<>"",$K' + r0 + '<>"",$K' + r0 + '<=TODAY()-' + days + ',$M' + r0 + '="No")', C.orange, C.orangeInk, 'formula'),
+    cf(due, '=AND($A' + r0 + '<>"",$M' + r0 + '="No",OR(' + [tl.fu1, tl.fu2, tl.fu3].map(function (d, i) { return 'AND($J' + r0 + '=' + (i + 1) + ',TODAY()>=' + D(d) + ')'; }).join(',') + '))', C.orange, C.orangeInk, 'formula'),
     cf(rq, RQ.NOT, C.red, C.redInk), cf(rq, 'draft', C.yellow, C.yellowInk, 'contains'), cf(rq, RQ.RECEIVED, C.green, C.greenInk), cf(rq, RQ.DONE, C.green, C.greenInk),
     cf(rq, 'sent', C.blue, C.blueInk, 'contains'),
     cf(w9, 'Yes', C.green, C.greenInk, 'contains'), cf(w9, 'No', C.grey, C.greyInk),
     cf(st, 'Eligible', C.green, C.greenInk), cf(st, 'Needs W-9', C.yellow, C.yellowInk), cf(st, 'Needs review', C.orange, C.orangeInk)
   ]);
   // Layout
-  const widths = [230, 100, 110, 110, 140, 210, 120, 200, 160, 70, 110, 120, 140, 60, 100, 220];
+  const widths = [230, 125, 110, 110, 140, 210, 120, 200, 160, 70, 110, 120, 140, 60, 100, 220];
   widths.forEach(function (w, i) { sh.setColumnWidth(i + 1, w); });
   sh.hideColumns(COL['Thread ID']);
   sh.setFrozenRows(HR); sh.setFrozenColumns(1);
   sh.setTabColor(C.teal);
   if (sh.getFilter()) sh.getFilter().remove();
   if (rows.length) sh.getRange(HR, 1, rows.length + 1, CT.length).createFilter();
-  addButtons_(sh, [['drafts', 'draftsThisTab', 1, 6], ['followup', 'followUpSelected', 2, 0], ['allfu', 'followUpAllDue', 4, 0], ['sync', 'syncMine', 6, 0]]);
+  addButtons_(sh, [['drafts', 'draftsThisTab', 1, 6], ['followup', 'followUpSelected', 2, 0], ['allfu', 'followUpAllDue', 4, 0], ['sync', 'syncMine', 6, 0], ['undo', 'resetSelected', 7, 20], ['drive', 'checkDriveThisTab', 9, 0]]);
 }
 
 /** Adds clickable image buttons once (they stay put when the tab is rewritten). Click runs as the clicker. */
 function addButtons_(sh, list) {
-  const ver = 'btn-v2';
+  const ver = 'btn-v4';
   const imgs = sh.getImages();
   if (imgs.length && sh.getRange('A3').getNote() === ver) return;
   imgs.forEach(function (im) { im.remove(); });
@@ -352,6 +398,14 @@ function addButtons_(sh, list) {
     const img = sh.insertImage(Utilities.newBlob(Utilities.base64Decode(BTN[b[0]]), 'image/png', b[0] + '.png'), b[2], 3, b[3], 6);
     img.assignScript(b[1]);
   });
+}
+
+function repairThisTab() {
+  const sh = SpreadsheetApp.getActiveSheet();
+  if (!isClientTab_(sh)) { SpreadsheetApp.getUi().alert('Open the company tab you want to repair first.'); return; }
+  const t = read_(sh);
+  write_(sh, t.rows); refreshSummary_(SpreadsheetApp.getActive());
+  SpreadsheetApp.getUi().alert(sh.getName() + ' rebuilt ✓  ' + t.rows.length + ' vendors kept.\n\nTip: don’t use Ctrl+Z after a button or menu action — use “Undo selected” instead.');
 }
 
 function reformatAll() {
@@ -373,14 +427,14 @@ function draftsSelectedCompany() {
   const ss = SpreadsheetApp.getActive(); const sh = ss.getActiveSheet();
   if (sh.getName() !== SYS.SUMMARY) { draftsThisTab(); return; }
   const row = sh.getActiveRange().getRow();
-  const name = row >= 6 ? String(sh.getRange(row, 1).getValue()).trim() : '';
+  const name = String(sh.getRange(row, 1).getValue()).trim();
   const tab = name && ss.getSheetByName(name);
   if (!tab) { SpreadsheetApp.getUi().alert('Click a company name on the Dashboard first, then press the button.'); return; }
   createDrafts_([tab]);
 }
 
-function createDrafts_(tabs) {
-  const ui = SpreadsheetApp.getUi();
+function createDrafts_(tabs, silent) {
+  const ui = silent ? null : SpreadsheetApp.getUi();
   const me = Session.getActiveUser().getEmail().toLowerCase();
   const todo = []; let noContact = 0, others = 0;
   const data = tabs.map(function (sh) { return { sh: sh, t: read_(sh) }; });
@@ -394,27 +448,64 @@ function createDrafts_(tabs) {
     });
   });
   if (!todo.length) {
-    ui.alert('No W-9 request drafts to create for ' + me + '.\n\nA row needs: Request Status "Not sent", Sender Email = your email, and a Contact Email.' +
+    if (ui) ui.alert('No W-9 request drafts to create for ' + me + '.\n\nA row needs: Request Status "Not sent", W-9 Received "No", Sender Email = your email, and a Contact Email.' +
       (noContact ? '\n• ' + noContact + ' of your rows have no Contact Email.' : '') + (others ? '\n• ' + others + ' rows belong to other senders (or have no Sender Email).' : ''));
-    return;
+    return 0;
   }
-  if (ui.alert('Create ' + todo.length + ' W-9 request drafts in your Gmail (' + me + ')?\n\nNothing is sent — you review and send them from Gmail → Drafts.', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+  const tl = timeline_();
+  if (ui) {
+    const early = today_() < tl.email ? '\n\nNote: the plan starts emails on ' + short_(tl.email) + '. You can still create them now.' : '';
+    if (ui.alert('Create ' + todo.length + ' W-9 request drafts in your Gmail (' + me + ')?\n\nNothing is sent — you review and send them from Gmail → Drafts.' + early, ui.ButtonSet.YES_NO) !== ui.Button.YES) return 0;
+  }
   const tpl = templatesMap_()['Request'];
   let w9 = null;
   if (/^y/i.test(String(setting_('Attach W-9 PDF')))) { try { w9 = UrlFetchApp.fetch(IRS_W9).getBlob().setName('Form W-9.pdf'); } catch (e) { log_('W-9 download failed', e.message); } }
+  const touched = [];
   todo.forEach(function (x) {
     const r = x.d.t.rows[x.i];
-    const data = tplData_(r, x.d.sh);
+    const td = tplData_(r, x.d.sh);
     const opts = { name: r['Sender Name'] || undefined };
     if (w9) opts.attachments = [w9];
-    const dr = GmailApp.createDraft(String(r['Contact Email']).trim(), fill_(tpl.subject, data), fill_(tpl.body, data), opts);
+    const dr = GmailApp.createDraft(String(r['Contact Email']).trim(), fill_(tpl.subject, td), fill_(tpl.body, td), opts);
     r['Thread ID'] = dr.getMessage().getThread().getId();
     r['Request Status'] = RQ.DRAFT;
+    if (touched.indexOf(x.d) < 0) touched.push(x.d);
   });
-  data.forEach(function (d) { write_(d.sh, d.t.rows); });
+  touched.forEach(function (d) { write_(d.sh, d.t.rows); });
   refreshSummary_(SpreadsheetApp.getActive());
   log_('Request drafts', todo.length + ' for ' + me);
-  ui.alert(todo.length + ' drafts created ✓\n\nOpen Gmail → Drafts, review each one and click Send.\nThen click “Sync status” here so the tracker turns blue.');
+  if (ui) ui.alert(todo.length + ' drafts created ✓\n\nOpen Gmail → Drafts, review each one and click Send.\nThen click “Sync status” here so the tracker turns blue.');
+  return todo.length;
+}
+
+/* ================================ UNDO ==================================== */
+
+/** Puts the selected rows back to "Not sent" and deletes their unsent Gmail drafts. Rows already emailed are left alone. */
+function resetSelected() {
+  const ui = SpreadsheetApp.getUi();
+  const sh = SpreadsheetApp.getActiveSheet();
+  if (!isClientTab_(sh)) { ui.alert('Open a company tab and select the vendor rows to reset (or click the column letter to select all).'); return; }
+  const t = read_(sh); const sel = sh.getActiveRange(); const idx = [];
+  for (let row = Math.max(t.hr + 1, sel.getRow()); row < sel.getRow() + sel.getNumRows(); row++) if (t.rows[row - t.hr - 1]) idx.push(row - t.hr - 1);
+  if (!idx.length) { ui.alert('Select the vendor rows to reset first (row ' + (t.hr + 1) + ' or below). Tip: drag down the Vendor column.'); return; }
+  if (ui.alert('Reset ' + idx.length + ' row(s) to "Not sent" and delete their unsent drafts from YOUR Gmail?\nRows that were already emailed are skipped.', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+  const me = Session.getActiveUser().getEmail().toLowerCase();
+  const draftsByThread = {};
+  GmailApp.getDrafts().forEach(function (d) { try { const id = d.getMessage().getThread().getId(); (draftsByThread[id] = draftsByThread[id] || []).push(d); } catch (e) { } });
+  let reset = 0, removed = 0, skipped = 0;
+  idx.forEach(function (i) {
+    const r = t.rows[i];
+    if ((Number(r['Sent Count']) || 0) > 0) { skipped++; return; }
+    const id = String(r['Thread ID'] || '');
+    if (id && draftsByThread[id] && String(r['Sender Email']).trim().toLowerCase() === me) {
+      draftsByThread[id].forEach(function (d) { d.deleteDraft(); removed++; });
+    }
+    r['Request Status'] = RQ.NOT; r['Thread ID'] = ''; r['Sent Count'] = 0; r['Last Contact'] = '';
+    reset++;
+  });
+  write_(sh, t.rows); refreshSummary_(SpreadsheetApp.getActive());
+  log_('Reset rows', reset + ' reset, ' + removed + ' drafts deleted, ' + skipped + ' already emailed (skipped)');
+  ui.alert(reset + ' row(s) set back to "Not sent" ✓\n' + removed + ' draft(s) deleted from your Gmail.' + (skipped ? '\n' + skipped + ' row(s) skipped because they were already emailed.' : ''));
 }
 
 /* ============================== FOLLOW-UPS ================================ */
@@ -431,30 +522,42 @@ function followUpSelected() {
   ui.alert(res.join('\n') || 'Nothing selected.');
 }
 
-function followUpAllDue() {
-  const ui = SpreadsheetApp.getUi();
-  syncMine(true);
-  const days = Number(setting_('Follow-up After (days)')) || 7;
+/** A follow-up is due when its timeline date has arrived: 1 email sent → Follow-up 1 date, 2 → Follow-up 2, 3 → Follow-up 3 (final). */
+function fuDue_(r, tl, today) {
+  if (/^y/i.test(String(r['W-9 Received']))) return false;
+  const sent = Number(r['Sent Count']) || 0;
+  if (sent < 1 || sent > 3) return false;
+  return today >= [tl.fu1, tl.fu2, tl.fu3][sent - 1];
+}
+
+function followUpAllDue(silent) {
+  silent = silent === true;
+  const ui = silent ? null : SpreadsheetApp.getUi();
+  if (!silent) syncMine(true);
+  const tl = timeline_(), today = today_();
   const me = Session.getActiveUser().getEmail().toLowerCase();
-  const now = new Date(); let total = 0; const plans = [];
+  let total = 0, replied = 0; const plans = [];
   clientTabs_(SpreadsheetApp.getActive()).forEach(function (sh) {
     const t = read_(sh); const idx = [];
     t.rows.forEach(function (r, i) {
       if (String(r['Sender Email']).trim().toLowerCase() !== me) return;
-      if (/^y/i.test(String(r['W-9 Received']))) return;
-      if ((Number(r['Sent Count']) || 0) < 1 || r['Request Status'] === RQ.FU_DRAFT) return;
-      if (r['Vendor Replied']) return; // read the reply first
-      const last = r['Last Contact'] ? new Date(r['Last Contact']) : null;
-      if (last && (now - last) / 86400000 >= days) idx.push(i);
+      if (!fuDue_(r, tl, today) || r['Request Status'] === RQ.FU_DRAFT) return;
+      if (r['Vendor Replied']) { replied++; return; } // read the reply first
+      idx.push(i);
     });
     if (idx.length) { plans.push({ sh: sh, t: t, idx: idx }); total += idx.length; }
   });
-  if (!total) { ui.alert('No follow-ups are due for ' + me + ' (emailed ' + days + '+ days ago, no reply, no W-9).'); return; }
-  if (ui.alert('Create ' + total + ' follow-up drafts (replies in the same email threads)?', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+  if (!total) {
+    if (ui) ui.alert('No follow-ups are due today for ' + me + '.\n\nSchedule: Follow-up 1 on ' + short_(tl.fu1) + ', Follow-up 2 on ' + short_(tl.fu2) + ', final notice on ' + short_(tl.fu3) + '.' +
+      (replied ? '\n' + replied + ' vendor(s) replied without a W-9 — read their reply, then use “Follow up selected” if needed.' : ''));
+    return 0;
+  }
+  if (ui && ui.alert('Create ' + total + ' follow-up drafts (replies in the same email threads)?', ui.ButtonSet.YES_NO) !== ui.Button.YES) return 0;
   let made = 0;
   plans.forEach(function (pl) { made += followUp_(pl.sh, pl.t, pl.idx).filter(function (x) { return /created/.test(x); }).length; write_(pl.sh, pl.t.rows); });
   refreshSummary_(SpreadsheetApp.getActive());
-  ui.alert(made + ' follow-up drafts created ✓ Review them in Gmail → Drafts and click Send.');
+  if (ui) ui.alert(made + ' follow-up drafts created ✓ Review them in Gmail → Drafts and click Send.');
+  return made;
 }
 
 function followUp_(sh, t, idx) {
@@ -539,67 +642,277 @@ function syncMine(silent) {
 }
 function dailySync_() { syncMine(true); }
 
+/* =============================== TIMELINE ================================= */
+
+function today_() { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+function toDate_(v) {
+  if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v)) return new Date(v.getFullYear(), v.getMonth(), v.getDate());
+  const m = String(v || '').match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const d = new Date(String(v)); return isNaN(d) ? null : new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+function ymd_(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
+function short_(d) { return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()] + ' ' + d.getDate(); }
+function holidays_(ss) {
+  const raw = String(setting_('Timeline: Holidays (not working days)', ss) || HOLIDAYS_DEFAULT);
+  const out = {}; (raw.match(/\d{4}-\d{1,2}-\d{1,2}/g) || []).forEach(function (x) { out[ymd_(toDate_(x))] = 1; }); return out;
+}
+let HOL_CACHE = null;
+function isWorkday_(d, ss) { HOL_CACHE = HOL_CACHE || holidays_(ss); const w = d.getDay(); return w !== 0 && w !== 6 && !HOL_CACHE[ymd_(d)]; }
+/** Weekend or holiday → next working day. */
+function workday_(d, ss) { const x = new Date(d); while (!isWorkday_(x, ss)) x.setDate(x.getDate() + 1); return x; }
+/** Timeline dates from the Settings tab (defaults if missing), each moved to a working day. */
+function timeline_(ss) {
+  ss = ss || book_();
+  const out = {};
+  TL.forEach(function (t) { out[t[0]] = workday_(toDate_(setting_(t[1], ss)) || toDate_(t[2]), ss); });
+  return out;
+}
+/** Adds any Settings rows this version needs without touching existing ones. */
+function ensureSettings_(ss) {
+  const sh = ss.getSheetByName(SYS.SETTINGS); if (!sh) return;
+  const have = sh.getRange(1, 1, Math.max(sh.getLastRow(), 1), 1).getValues().map(function (r) { return String(r[0]).trim(); });
+  const want = TL.map(function (t) { return [t[1], t[2], 'Date (YYYY-MM-DD). Weekends and holidays move to the next working day.']; });
+  want.push(['Timeline: Holidays (not working days)', HOLIDAYS_DEFAULT, 'Comma-separated dates that are not working days']);
+  want.push(['W-9 Drive Folder URL (all clients)', '', 'Optional: one Drive folder that holds W-9s for every client (subfolders are searched). A company tab can also have its own folder.']);
+  const add = want.filter(function (w) { return have.indexOf(w[0]) < 0; });
+  if (add.length) { const r = sh.getRange(sh.getLastRow() + 1, 1, add.length, 3); r.setNumberFormat('@'); r.setValues(add); }
+}
+
+/* ============================ DRIVE W-9 CHECK ============================== */
+
+function normV_(name) {
+  let s = String(name || '').toLowerCase().replace(/&/g, ' and ');
+  s = s.replace(/l\.l\.c\.?/g, ' llc ').replace(/[^a-z0-9 ]+/g, ' ');
+  s = s.replace(/\b(llc|l l c|inc|incorporated|corp|corporation|co|company|ltd|limited|pllc|plc|lp|llp|pc|pa|the|dba)\b/g, ' ');
+  return s.replace(/\s+/g, ' ').trim();
+}
+function fileNorm_(name) {
+  return ' ' + normV_(String(name).replace(/\.[a-z0-9]{2,5}$/i, '').replace(/w-?\s?9|w-?\s?8\w*|form|signed|completed|final|copy/ig, ' ').replace(/[_\-,.]/g, ' ').replace(/\b(19|20)\d{2}\b/g, ' ')) + ' ';
+}
+function driveFiles_(folderUrl) {
+  const out = [];
+  const walk = function (folder, depth) {
+    const it = folder.getFiles();
+    while (it.hasNext() && out.length < 3000) { const f = it.next(); out.push({ name: f.getName(), url: f.getUrl(), norm: fileNorm_(f.getName()) }); }
+    if (depth >= 4) return;
+    const sub = folder.getFolders(); while (sub.hasNext()) walk(sub.next(), depth + 1);
+  };
+  walk(DriveApp.getFolderById(folderId_(folderUrl)), 0);
+  return out;
+}
+/** Best W-9 file for a vendor name: whole name inside the file name, or (2+ words) every word present. */
+function findW9_(vendor, files) {
+  const key = normV_(vendor); if (key.length < 3) return null;
+  const words = key.split(' ').filter(function (w) { return w.length > 1; });
+  let best = null;
+  files.forEach(function (f) {
+    if (best && /w-?\s?9/i.test(best.name)) return;
+    const whole = f.norm.indexOf(' ' + key + ' ') >= 0;
+    const all = words.length >= 2 && words.every(function (w) { return f.norm.indexOf(' ' + w + ' ') >= 0; });
+    if (whole || all) best = f;
+  });
+  return best;
+}
+function tabFolder_(sh, ss) { return meta_(sh).folder || String(setting_('W-9 Drive Folder URL (all clients)', ss) || '').trim(); }
+
+function checkDriveTab_(sh, ss, files) {
+  const folder = tabFolder_(sh, ss); if (!folder) return -1;
+  files = files || driveFiles_(folder);
+  const t = read_(sh); let found = 0;
+  t.rows.forEach(function (r) {
+    if (/^y/i.test(String(r['W-9 Received']))) return;
+    const f = findW9_(r['Vendor'], files); if (!f) return;
+    r['W-9 Received'] = 'Yes (Drive)'; r['Request Status'] = RQ.RECEIVED;
+    if (String(r['Notes']).indexOf(f.url) < 0) r['Notes'] = (r['Notes'] ? r['Notes'] + ' ' : '') + f.url;
+    found++;
+  });
+  const m = meta_(sh); m.checked = ymd_(today_()) + ' (' + files.length + ' files)'; setMeta_(sh, m);
+  write_(sh, t.rows);
+  return found;
+}
+function checkDriveThisTab() {
+  const ui = SpreadsheetApp.getUi(); const ss = SpreadsheetApp.getActive(); const sh = ss.getActiveSheet();
+  if (!isClientTab_(sh)) { ui.alert('Open a company tab first.'); return; }
+  if (!tabFolder_(sh, ss)) {
+    const r = ui.prompt('W-9 folder for ' + sh.getName(), 'Paste the Google Drive folder link that holds this client’s W-9s (view access is enough; subfolders are searched):', ui.ButtonSet.OK_CANCEL);
+    if (r.getSelectedButton() !== ui.Button.OK || !/folders\/|id=/.test(r.getResponseText())) return;
+    const m = meta_(sh); m.folder = r.getResponseText().trim(); setMeta_(sh, m);
+  }
+  let found;
+  try { found = checkDriveTab_(sh, ss); } catch (e) { ui.alert('Couldn’t open that Drive folder.\n\nMake sure it is shared with ' + Session.getActiveUser().getEmail() + ' and the link is a folder link.\n\n(' + e.message + ')'); return; }
+  refreshSummary_(ss);
+  ui.alert(found + ' new W-9' + (found === 1 ? '' : 's') + ' found in Drive ✓\n\nMatched vendors are marked “Yes (Drive)” with the file link in Notes, and will not be emailed.\nFiles are matched by name — name them like “Vendor Name W-9.pdf”.');
+}
+function checkDriveAll_(ss) {
+  let total = 0; const cache = {};
+  clientTabs_(ss).forEach(function (sh) {
+    const folder = tabFolder_(sh, ss); if (!folder) return;
+    try { cache[folder] = cache[folder] || driveFiles_(folder); total += Math.max(0, checkDriveTab_(sh, ss, cache[folder])); }
+    catch (e) { log_('Drive check failed', sh.getName() + ': ' + e.message, ss); }
+  });
+  return total;
+}
+function checkDriveAll() {
+  const ss = SpreadsheetApp.getActive(); const n = checkDriveAll_(ss); refreshSummary_(ss);
+  const none = clientTabs_(ss).filter(function (sh) { return !tabFolder_(sh, ss); }).map(function (sh) { return sh.getName(); });
+  SpreadsheetApp.getUi().alert(n + ' new W-9s found in Drive ✓' + (none.length ? '\n\nNo W-9 folder set for: ' + none.join(', ') + '.\nOpen that tab and click “Check Drive for W-9s” to paste its folder link.' : ''));
+}
+
+/** Called from the EP 1099 Tool ("Get W-9s from Drive"): scans the folder as the signed-in user and hands the matches back to the app. */
+function w9Page_(p) {
+  let names = [];
+  try { names = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(p.d)).getDataAsString()); } catch (e) { return page_('Couldn’t read the vendor list', 'Try again from the app.', false); }
+  const ss = SpreadsheetApp.openById(PropertiesService.getScriptProperties().getProperty('SHEET_ID'));
+  const folder = p.f || String(setting_('W-9 Drive Folder URL (all clients)', ss) || '');
+  if (!folder) return page_('No W-9 folder', 'Paste the client’s W-9 Drive folder link on the tracker in the app first.', false);
+  let files;
+  try { files = driveFiles_(folder); } catch (e) { return page_('Couldn’t open the Drive folder', 'Make sure the folder is shared with ' + Session.getActiveUser().getEmail() + ' and the link is a folder link. (' + e.message + ')', false); }
+  const hits = [];
+  names.forEach(function (n) { const f = findW9_(n, files); if (f) hits.push([n, f.name, f.url]); });
+  const sh = p.c ? ss.getSheetByName(tabName_(p.c)) : null;
+  if (sh && isClientTab_(sh)) { const m = meta_(sh); m.folder = folder; setMeta_(sh, m); try { checkDriveTab_(sh, ss, files); refreshSummary_(ss); } catch (e) { } }
+  const back = /^https:\/\//.test(String(p.r || '')) ? String(p.r).split('#')[0] : '';
+  const payload = Utilities.base64EncodeWebSafe(JSON.stringify({ c: p.c || '', m: hits.slice(0, 60) }));
+  const rows = hits.map(function (h) { return '<tr><td style="padding:4px 12px 4px 0"><b>' + esc_(h[0]) + '</b></td><td style="padding:4px 0;color:#55627d">' + esc_(h[1]) + '</td></tr>'; }).join('');
+  return HtmlService.createHtmlOutput(
+    '<div style="font-family:system-ui,sans-serif;max-width:680px;margin:40px auto;padding:24px;border:1px solid #d5e6e1;border-radius:12px">' +
+    '<div style="font-weight:700;font-size:20px;color:#11845b">' + hits.length + ' of ' + names.length + ' vendors have a W-9 in Drive</div>' +
+    '<p style="color:#55627d">' + files.length + ' files checked in the folder (subfolders included). Files are matched by name.</p>' +
+    (rows ? '<table style="font-size:13px;border-collapse:collapse">' + rows + '</table>' : '<p>No matching file names. Name files like “Vendor Name W-9.pdf”.</p>') +
+    (back && hits.length ? '<p style="margin-top:20px"><a target="_top" style="background:#00c49a;color:#1c2a4d;font-weight:700;padding:10px 16px;border-radius:8px;text-decoration:none" href="' + back + '#w9=' + payload + '">Save these W-9s in the EP 1099 Tool</a></p>' : '') +
+    '</div>').setTitle('EP 1099 – W-9s in Drive');
+}
+function esc_(s) { return String(s).replace(/[&<>"]/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]; }); }
+
 /* ============================== DASHBOARD ================================= */
 
 function refreshSummary() { const ss = SpreadsheetApp.getActive(); refreshSummary_(ss); ss.setActiveSheet(ss.getSheetByName(SYS.SUMMARY)); }
 
+/** Per-company numbers for the management dashboard. */
+function tabStats_(sh, tl, today) {
+  const t = read_(sh); const m = meta_(sh);
+  const c = { name: sh.getName(), year: m.year, paid: m.paid, checked: m.checked, gid: sh.getSheetId(), sender: '',
+    n: 0, onFile: 0, toEmail: 0, draft: 0, waiting: 0, due: 0, fu: [0, 0, 0], noResp: 0, replied: 0, emailed: 0 };
+  t.rows.forEach(function (r) {
+    c.n++; if (!c.sender && r['Sender Email']) c.sender = r['Sender Email'];
+    const sent = Number(r['Sent Count']) || 0;
+    if (sent > 0) c.emailed++;
+    if (/^y/i.test(String(r['W-9 Received']))) { c.onFile++; return; }
+    const s = String(r['Request Status'] || RQ.NOT);
+    if (/draft/i.test(s)) c.draft++; else if (sent === 0) c.toEmail++;
+    if (sent > 0) c.waiting++;
+    if (fuDue_(r, tl, today)) { c.due++; c.fu[sent - 1]++; }
+    if (sent >= 4) c.noResp++;
+    if (r['Vendor Replied']) c.replied++;
+  });
+  return c;
+}
+
 function refreshSummary_(ss) {
   let sh = ss.getSheetByName(SYS.SUMMARY);
-  if (!sh) { sh = ss.insertSheet(SYS.SUMMARY, 0); }
-  const head = ['Company', 'Tax Year', 'Sender', 'Vendors', 'To Email', 'Draft Ready', 'Emailed – Waiting', 'Follow-up Due', 'Vendor Replied', 'W-9 Received', '% Complete', 'Open'];
-  const tabs = clientTabs_(ss);
-  const all = sh.getRange(1, 1, sh.getMaxRows(), Math.max(sh.getMaxColumns(), head.length));
+  if (!sh) sh = ss.insertSheet(SYS.SUMMARY, 0);
+  HOL_CACHE = null;
+  const tl = timeline_(ss), today = today_();
+  const tabs = clientTabs_(ss).map(function (t) { return tabStats_(t, tl, today); });
+  const T = { n: 0, onFile: 0, toEmail: 0, draft: 0, waiting: 0, due: 0, noResp: 0, replied: 0, emailed: 0, paid: 0, checked: 0, fu: [0, 0, 0] };
+  tabs.forEach(function (c) { ['n', 'onFile', 'toEmail', 'draft', 'waiting', 'due', 'noResp', 'replied', 'emailed'].forEach(function (k) { T[k] += c[k]; });
+    T.paid += Number(c.paid) || 0; if (c.checked) T.checked++; c.fu.forEach(function (x, i) { T.fu[i] += x; }); });
+  const W = 15;
+  if (sh.getMaxColumns() < W) sh.insertColumnsAfter(sh.getMaxColumns(), W - sh.getMaxColumns());
+  const need = 24 + tabs.length; if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
+  const all = sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns());
   all.breakApart(); all.clearContent(); all.clearFormat(); sh.clearConditionalFormatRules();
   all.setFontFamily(FONT).setFontSize(10).setFontColor(C.ink).setVerticalAlignment('middle');
-  sh.getRange(1, 1, 2, head.length).setBackground(C.white);
-  sh.getRange(2, 1, 1, head.length).setBorder(null, null, true, null, null, null, C.teal, SpreadsheetApp.BorderStyle.SOLID_THICK);
-  sh.getRange(1, 1, 1, 8).merge().setValue('Enduring Planet  ·  1099 W-9 Collection Dashboard').setFontSize(18).setFontWeight('bold').setFontColor(C.navy);
-  sh.getRange(2, 1, 1, 8).merge().setValue(tabs.length + ' companies   ·   counts update live as the team changes statuses   ·   1099s due January 31')
-    .setFontColor(C.muted);
-  sh.setRowHeight(1, 40); sh.setRowHeight(2, 24); sh.setRowHeight(3, 46);
-  sh.getRange(3, 6, 1, 6).merge().setValue('Click a company name below, then “Drafts for selected company”.').setFontSize(9).setFontStyle('italic').setFontColor(C.muted);
-  sh.getRange(5, 1, 1, head.length).setValues([head]).setFontWeight('bold').setFontColor(C.navy).setBackground(C.teal).setWrap(true).setHorizontalAlignment('center');
-  sh.getRange(5, 1).setHorizontalAlignment('left');
-  sh.setRowHeight(5, 32);
-  const rows = tabs.map(function (t) {
-    const q = "'" + t.getName().replace(/'/g, "''") + "'!";
-    return [t.getName(), tabYear_(t), '=IFERROR(' + q + 'H' + (HR + 1) + ',"")', '=' + q + 'A5', '=' + q + 'B5', '=' + q + 'C5', '=' + q + 'D5', '=' + q + 'E5', '=' + q + 'F5', '=' + q + 'G5', '=' + q + 'H5',
-      '=HYPERLINK("#gid=' + t.getSheetId() + '","Open →")'];
+  sh.setFrozenRows(0);
+
+  // Title
+  sh.getRange(1, 1, 3, W).setWrap(false);
+  sh.getRange(2, 1, 1, W).setBorder(null, null, true, null, null, null, C.teal, SpreadsheetApp.BorderStyle.SOLID_THICK);
+  sh.getRange(1, 1).setValue('Enduring Planet  ·  1099 Management Dashboard').setFontSize(18).setFontWeight('bold').setFontColor(C.navy);
+  sh.getRange(2, 1).setValue('Updated ' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'EEE MMM d, yyyy h:mm a') + '   ·   click “Refresh dashboard” for the latest numbers   ·   tracker ' + VERSION).setFontColor(C.muted);
+  sh.setRowHeight(1, 40); sh.setRowHeight(2, 24); sh.setRowHeight(3, 46); sh.setRowHeight(4, 8);
+
+  // Management numbers
+  const pct = T.n ? T.onFile / T.n : 0;
+  const kpi = [['Clients', tabs.length, C.ink], ['Vendors paid', T.paid || '—', C.ink], ['1099-eligible vendors', T.n, C.ink], ['W-9 on file / received', T.onFile, C.greenInk],
+    ['To email', T.toEmail + T.draft, C.redInk], ['Emailed – waiting', T.waiting, C.blueInk], ['Follow-up due today', T.due, C.orangeInk], ['No reply after 3 follow-ups', T.noResp, C.redInk], ['W-9s collected', pct, C.greenInk]];
+  kpi.forEach(function (k, i) {
+    sh.getRange(5, i + 1).setValue(k[0]).setFontSize(9).setFontWeight('bold').setFontColor(C.navy).setBackground(C.mint).setHorizontalAlignment('center').setWrap(true);
+    sh.getRange(6, i + 1).setValue(k[1]).setFontSize(20).setFontWeight('bold').setFontColor(k[2]).setBackground(C.white).setHorizontalAlignment('center');
   });
-  if (rows.length) {
-    const r = sh.getRange(6, 1, rows.length, head.length);
-    r.setValues(rows.map(function (x) { return x.map(function (v) { return /^=/.test(String(v)) ? '' : v; }); }));
-    rows.forEach(function (x, i) { x.forEach(function (v, j) { if (/^=/.test(String(v))) sh.getRange(6 + i, j + 1).setFormula(v); }); });
-    r.setBorder(null, null, true, null, null, true, C.line, SpreadsheetApp.BorderStyle.SOLID).setHorizontalAlignment('center');
-    sh.getRange(6, 1, rows.length, 1).setFontWeight('bold').setHorizontalAlignment('left');
-    sh.getRange(6, 4, rows.length, 7).setFontSize(12).setFontWeight('bold');
-    sh.getRange(6, 11, rows.length, 1).setNumberFormat('0%').setFontWeight('bold');
-    sh.setRowHeights(6, rows.length, 30);
-    const col = function (c) { return sh.getRange(6, c, rows.length, 1); };
-    sh.setConditionalFormatRules([
-      SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThan(0).setBackground(C.red).setFontColor(C.redInk).setRanges([col(5)]).build(),
-      SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThan(0).setBackground(C.yellow).setFontColor(C.yellowInk).setRanges([col(6)]).build(),
-      SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThan(0).setBackground(C.blue).setFontColor(C.blueInk).setRanges([col(7)]).build(),
-      SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThan(0).setBackground(C.orange).setFontColor(C.orangeInk).setRanges([col(8)]).build(),
-      SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThan(0).setBackground(C.green).setFontColor(C.greenInk).setRanges([col(10)]).build(),
+  sh.getRange(6, kpi.length).setNumberFormat('0%');
+  sh.getRange(5, 1, 2, kpi.length).setBorder(true, true, true, true, true, false, C.teal, SpreadsheetApp.BorderStyle.SOLID);
+  sh.setRowHeight(5, 32); sh.setRowHeight(6, 40); sh.setRowHeight(7, 12);
+
+  // Timeline
+  const st = function (done, date, overdueAfter, active) {
+    if (done) return 'Done';
+    if (today > (overdueAfter || date)) return 'Overdue';
+    if (today >= date || active) return 'In progress';
+    return 'Upcoming';
+  };
+  const toSend = T.toEmail + T.draft;
+  const fuRow = function (i, d, label) {
+    const dueNow = today >= d ? T.fu[i] : 0;
+    return [label, short_(d), today < d ? 'Upcoming' : (dueNow ? 'Due now' : 'Done'), today < d ? 'Vendors with no W-9 get a reminder in the same email thread' : (dueNow ? dueNow + ' follow-up drafts to create and send' : 'Nothing outstanding')];
+  };
+  const phases = [
+    ['1. Kick-off — upload GLs, confirm 1099 vendors', short_(tl.start), today >= tl.start ? (tabs.length ? 'Done' : 'In progress') : 'Upcoming', tabs.length + ' client' + (tabs.length === 1 ? '' : 's') + ' in the tracker, ' + T.n + ' vendors need a 1099'],
+    ['2. W-9 inventory — check Drive for W-9s on file', short_(tl.inv) + ' (latest ' + short_(tl.invMax) + ')', st(tabs.length > 0 && T.checked === tabs.length, tl.start, tl.invMax), T.checked + ' of ' + tabs.length + ' clients checked · ' + T.onFile + ' W-9s on file, ' + (T.n - T.onFile) + ' missing'],
+    ['3. Send W-9 request emails', short_(tl.email), st(T.n > 0 && toSend === 0, tl.email, tl.fu1), T.emailed + ' emailed · ' + toSend + ' still to send'],
+    fuRow(0, tl.fu1, '4. Follow-up 1'), fuRow(1, tl.fu2, '5. Follow-up 2'), fuRow(2, tl.fu3, '6. Follow-up 3 (final notice)'),
+    ['7. W-9 collection deadline', short_(tl.due), st(T.n > 0 && T.onFile === T.n, tl.email, tl.due), T.onFile + ' of ' + T.n + ' W-9s collected (' + Math.round(pct * 100) + '%)' + (T.noResp ? ' · ' + T.noResp + ' no reply after 3 follow-ups' : '')],
+    ['8. File 1099s with the IRS and send to vendors', short_(tl.file) + ', ' + tl.file.getFullYear(), today > tl.file ? 'Overdue' : 'Upcoming', 'Jan 31 falls on a weekend in 2027, so the due date is the next working day']
+  ];
+  const TR = 8;
+  sh.getRange(TR, 1).setValue('Timeline — where we are').setFontSize(13).setFontWeight('bold');
+  sh.getRange(TR + 1, 1, 1, 9).setBackground(C.teal).setFontColor(C.navy).setFontWeight('bold');
+  sh.getRange(TR + 1, 1).setValue('Phase'); sh.getRange(TR + 1, 4).setValue('Target date'); sh.getRange(TR + 1, 5).setValue('Status'); sh.getRange(TR + 1, 6).setValue('Progress');
+  let here = phases.findIndex(function (p) { return p[2] !== 'Done'; }); if (here < 0) here = phases.length - 1;
+  phases.forEach(function (p, i) {
+    const r = TR + 2 + i;
+    sh.getRange(r, 1).setValue(p[0] + (i === here ? '   ◀ we are here' : '')).setFontWeight(i === here ? 'bold' : 'normal');
+    sh.getRange(r, 4).setValue(p[1]); sh.getRange(r, 6).setValue(p[3]).setFontColor(C.muted);
+    const col = { 'Done': [C.green, C.greenInk], 'In progress': [C.blue, C.blueInk], 'Due now': [C.orange, C.orangeInk], 'Overdue': [C.red, C.redInk], 'Upcoming': [C.grey, C.greyInk] }[p[2]];
+    sh.getRange(r, 5).setValue(p[2]).setBackground(col[0]).setFontColor(col[1]).setFontWeight('bold').setHorizontalAlignment('center');
+    if (i === here) sh.getRange(r, 1, 1, 4).setBackground(C.mint);
+    sh.getRange(r, 1, 1, 9).setBorder(null, null, true, null, null, null, C.line, SpreadsheetApp.BorderStyle.SOLID);
+  });
+  sh.getRange(TR + 1, 1, phases.length + 1, 9).setWrap(false);
+
+  // Clients
+  const CR = TR + phases.length + 3;
+  const head = ['Client', 'Tax Year', 'Sender', 'Vendors paid', '1099-eligible', 'W-9 on file', 'To email', 'Draft ready', 'Emailed – waiting', 'Follow-up due', 'No reply (3 follow-ups)', 'Vendor replied', '% W-9 collected', 'Drive checked', 'Open'];
+  sh.getRange(CR, 1).setValue('Clients').setFontSize(13).setFontWeight('bold');
+  sh.getRange(CR + 1, 1, 1, head.length).setValues([head]).setFontWeight('bold').setFontColor(C.navy).setBackground(C.teal).setWrap(true).setHorizontalAlignment('center');
+  sh.getRange(CR + 1, 1).setHorizontalAlignment('left'); sh.setRowHeight(CR + 1, 34);
+  if (tabs.length) {
+    const rows = tabs.map(function (c) { return [c.name, c.year, c.sender, c.paid || '', c.n, c.onFile, c.toEmail, c.draft, c.waiting, c.due, c.noResp, c.replied, c.n ? c.onFile / c.n : 0, c.checked || 'Not yet', '']; });
+    const r = sh.getRange(CR + 2, 1, rows.length, head.length);
+    r.setValues(rows).setHorizontalAlignment('center').setBorder(null, null, true, null, null, true, C.line, SpreadsheetApp.BorderStyle.SOLID);
+    tabs.forEach(function (c, i) { sh.getRange(CR + 2 + i, head.length).setFormula('=HYPERLINK("#gid=' + c.gid + '","Open →")'); });
+    sh.getRange(CR + 2, 1, rows.length, 1).setFontWeight('bold').setHorizontalAlignment('left');
+    sh.getRange(CR + 2, 4, rows.length, 9).setFontSize(12).setFontWeight('bold');
+    sh.getRange(CR + 2, 13, rows.length, 1).setNumberFormat('0%');
+    sh.setRowHeights(CR + 2, rows.length, 30);
+    const col = function (c) { return sh.getRange(CR + 2, c, rows.length, 1); };
+    const gt0 = function (c, bg, ink) { return SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThan(0).setBackground(bg).setFontColor(ink).setRanges([col(c)]).build(); };
+    sh.setConditionalFormatRules([gt0(6, C.green, C.greenInk), gt0(7, C.red, C.redInk), gt0(8, C.yellow, C.yellowInk), gt0(9, C.blue, C.blueInk), gt0(10, C.orange, C.orangeInk), gt0(11, C.red, C.redInk),
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('Not yet').setBackground(C.yellow).setFontColor(C.yellowInk).setRanges([col(14)]).build(),
       SpreadsheetApp.newConditionalFormatRule().setGradientMinpointWithValue('#fde2e6', SpreadsheetApp.InterpolationType.NUMBER, '0')
         .setGradientMidpointWithValue('#fff0cc', SpreadsheetApp.InterpolationType.NUMBER, '0.5')
-        .setGradientMaxpointWithValue('#dcf4e8', SpreadsheetApp.InterpolationType.NUMBER, '1').setRanges([col(11)]).build()
-    ]);
-    // Totals row
-    const tr = 6 + rows.length;
-    sh.getRange(tr, 1).setValue('ALL COMPANIES').setFontWeight('bold');
-    for (let c = 4; c <= 10; c++) { const L = String.fromCharCode(64 + c); sh.getRange(tr, c).setFormula('=SUM(' + L + '6:' + L + (tr - 1) + ')'); }
-    sh.getRange(tr, 11).setFormula('=IF(D' + tr + '=0,0,J' + tr + '/D' + tr + ')').setNumberFormat('0%');
-    sh.getRange(tr, 1, 1, head.length).setBackground(C.mint).setFontWeight('bold').setFontSize(12).setHorizontalAlignment('center');
-    sh.getRange(tr, 1).setHorizontalAlignment('left');
+        .setGradientMaxpointWithValue('#dcf4e8', SpreadsheetApp.InterpolationType.NUMBER, '1').setRanges([col(13)]).build()]);
+    const tr = CR + 2 + rows.length;
+    sh.getRange(tr, 1, 1, head.length).setValues([['ALL CLIENTS', '', '', T.paid || '', T.n, T.onFile, T.toEmail, T.draft, T.waiting, T.due, T.noResp, T.replied, pct, T.checked + ' of ' + tabs.length, '']])
+      .setBackground(C.mint).setFontWeight('bold').setFontSize(12).setHorizontalAlignment('center');
+    sh.getRange(tr, 13).setNumberFormat('0%'); sh.getRange(tr, 1).setHorizontalAlignment('left');
   } else {
-    sh.getRange(6, 1).setValue('No companies yet — in the EP 1099 Tool, open a company and click “Send to email tracker”.').setFontColor(C.muted);
+    sh.getRange(CR + 2, 1).setValue('No clients yet — in the EP 1099 Tool, open a company and click “Send to email tracker”.').setFontColor(C.muted);
   }
-  [240, 80, 220, 80, 90, 90, 110, 100, 100, 100, 100, 80].forEach(function (w, i) { sh.setColumnWidth(i + 1, w); });
-  sh.setFrozenRows(5);
+  [250, 80, 210, 100, 110, 110, 100, 100, 110, 110, 120, 100, 110, 150, 80].forEach(function (w, i) { sh.setColumnWidth(i + 1, w); });
   sh.setTabColor(C.teal);
-  addButtons_(sh, [['company', 'draftsSelectedCompany', 1, 6], ['allfu', 'followUpAllDue', 3, 30], ['sync', 'syncMine', 5, 0]]);
+  addButtons_(sh, [['today', 'runTodayTasks', 1, 6], ['company', 'draftsSelectedCompany', 3, 0], ['allfu', 'followUpAllDue', 5, 40], ['drive', 'checkDriveAll', 7, 30], ['refresh', 'refreshSummary', 9, 40]]);
 }
 
 /* ============================ IRS WATCHER ================================= */
@@ -639,10 +952,32 @@ function installIrsWatcher() {
   checkIrsUpdates();
   SpreadsheetApp.getUi().alert('Weekly IRS check is on (Mondays ~8am). You will be emailed when IRS 1099 rule text changes.');
 }
-function installDailySync() {
-  removeTriggers_('dailySync_');
-  ScriptApp.newTrigger('dailySync_').timeBased().everyDays(1).atHour(7).create();
-  SpreadsheetApp.getUi().alert('Daily email sync is on for ' + Session.getActiveUser().getEmail() + ' (~7am).');
+function installDailyAuto() {
+  removeTriggers_('dailySync_'); removeTriggers_('dailyAuto_');
+  ScriptApp.newTrigger('dailyAuto_').timeBased().everyDays(1).atHour(7).create();
+  SpreadsheetApp.getUi().alert('Daily automation is on for ' + Session.getActiveUser().getEmail() + ' (~7am, working days).\n\n' +
+    'Each morning it: syncs your sent emails and replies, checks Drive for new W-9s, and — from the email start date — creates the W-9 request and follow-up DRAFTS that are due.\n' +
+    'Nothing is ever sent automatically. You get an email when drafts are waiting.');
+}
+function installDailySync() { installDailyAuto(); }
+function dailyAuto_() { if (isWorkday_(today_())) todayTasks_(true); }
+function runTodayTasks() { todayTasks_(false); }
+
+function todayTasks_(silent) {
+  const ss = SpreadsheetApp.getActive() || SpreadsheetApp.openById(PropertiesService.getScriptProperties().getProperty('SHEET_ID'));
+  const tl = timeline_(ss), today = today_();
+  syncMine(true);
+  let w9 = 0; try { w9 = checkDriveAll_(ss); } catch (e) { log_('Drive check failed', e.message, ss); }
+  let req = 0, fu = 0;
+  if (today >= tl.email) { req = createDrafts_(clientTabs_(ss), true); fu = followUpAllDue(true); }
+  refreshSummary_(ss);
+  const msg = 'W-9s found in Drive: ' + w9 + '\nNew W-9 request drafts: ' + req + '\nFollow-up drafts: ' + fu +
+    (today < tl.email ? '\n\nEmail requests start on ' + short_(tl.email) + ' — no drafts created before then.' : '');
+  log_('Today’s tasks', msg.replace(/\n/g, ' | '), ss);
+  if (silent) {
+    if (req + fu > 0) MailApp.sendEmail(Session.getActiveUser().getEmail(), '[EP 1099] ' + (req + fu) + ' W-9 email drafts waiting in your Gmail',
+      'Review and send them from Gmail → Drafts.\n\n' + msg + '\n\nDashboard: ' + ss.getUrl());
+  } else SpreadsheetApp.getUi().alert('Today’s tasks done ✓\n\n' + msg + (req + fu ? '\n\nReview the drafts in Gmail → Drafts and click Send.' : ''));
 }
 function removeTriggers_(fn) { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === fn) ScriptApp.deleteTrigger(t); }); }
 
@@ -652,7 +987,7 @@ function tplData_(r, sh) {
   const up = String(setting_('Secure Upload Link') || '').trim();
   return {
     'Contact Name': String(r['Contact Name'] || '').trim() || 'there', 'Vendor': r['Vendor'], 'Company': tabCompany_(sh),
-    'Tax Year': tabYear_(sh), 'Due Date': fmt_(setting_('W-9 Due Date')), 'Upload Line': up ? ', or upload it securely here: ' + up : '',
+    'Tax Year': tabYear_(sh), 'Due Date': fmt_(timeline_().due), 'Upload Line': up ? ', or upload it securely here: ' + up : '',
     'W-9 Link': IRS_W9, 'Sender Name': r['Sender Name'] || '', 'Sender Title': String(setting_('Sender Title') || '')
   };
 }
@@ -663,8 +998,9 @@ function templatesMap_() {
   ['Request', 'Follow-up 1', 'Follow-up 2', 'Final notice'].forEach(function (k) { if (!out[k]) throw new Error('Templates tab is missing "' + k + '".'); });
   return out;
 }
+function book_() { return SpreadsheetApp.getActive() || SpreadsheetApp.openById(PropertiesService.getScriptProperties().getProperty('SHEET_ID')); }
 function setting_(name, ss) {
-  ss = ss || SpreadsheetApp.getActive();
+  ss = ss || book_();
   const sh = ss && ss.getSheetByName(SYS.SETTINGS); if (!sh) return '';
   const v = sh.getDataRange().getValues();
   for (let i = 1; i < v.length; i++) if (String(v[i][0]).trim() === name) return v[i][1];
@@ -687,9 +1023,13 @@ function log_(action, details, ss) {
 
 /* ======================= BUTTON IMAGES (do not edit) ======================= */
 const BTN = {
-  drafts: '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',
-  company: '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',
-  followup: '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',
-  allfu: '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',
-  sync: 'iVBORw0KGgoAAAANSUhEUgAAAIMAAAAiCAYAAAB83WotAAAOSklEQVR42u2ceXRUVbbGf+fcW3MlZCQEwjyEKRImFScCamMLDgxBcQRtG9HWFu33+jmibTdq99IW7FZb1NeDNgK2vVRQEQcQwqQIIYRJQgIEERLIQGWousN5f9RABQKiRlp52WvVqlW3ap+77zn77P3t75xTgqioGRLxiA3gWvePC5VSEwzLulxZRiamDQJBq/w4RaHQJUJz7HNo2ltCiNeDg6//8OhxDw/w/PkaEydavDMrS2+XMtM0jetRJliQJJwoQasn/Kh9AYSCahUCDRA6uu74h/nVofu49Jfl0fEXMc9YNrur7k38yNRVl45B3c5P68rlad3EAF+qABCt3vDjdQYVfi+sO6jeqtypFlSWssdlSt0UZWZ97UiG31mKmiEFM2ZILslK13XHKlMZXSf5Oxu/736OI8vpa+3F01TKQ3X8d8lKY25gl0MXjlLTNIbxXnmFRl6e0Lu2ecH0yPMneLKMeX1+4kjUnBjKJhwRWkPC6SK2UlgoknUX49O7a8W1lcYmAql6UHWwd9a+IdwFL14QcsplHZTT/DR3nJ7ucGMr0Fud4LQVUymkgAqjkaEb3jD3ipDuDNnDJUJebStTXZXWQ2Q4PFitjnDaiy4EloIMh4er0noIW5kKIa+Whm3lO0zEuNQuUgGyta/+X4iMVBnjUrtIh4kwbCtft6RKS5ROcvwpQgCyhaKCZdmR28WLQNNa3e0H4QwiTBzl+FOEXzqpIpSmY1pKORGmUi16s9Nh0JVS2HYYSEspvzGY/q76pwo/KADTUnrUQtFC9Wz0ed/7YBUrVhdSc7gOn8dNp6x2DOjfg7OH5nwnR1ERpz1ex4a/Vt+oElJxEyFeRwiBpmlfU783r3sy+t/muVu6whNxjeotPZMA7n3kWZ75y3waQyFs0wYpIGSS2i6F4tWvkZGegmlaIEAKiZQiLr1YKECLzCTLspp0gJRhR7JsG03Ko2ahijiaiF07UcdZto0UTWesUiqmt2nLTp5+7jWcDp1f3XkdnTu2CwMwTcO2VcTuI7rhKHDkc/HW4+tblo1CNXl+27axI/fW4p6zORtBtDgR2GLOYNs2UkqKNpfw0itvk5SUyKQJF3PBsIGETINt23dRWLwj5jC6rh0nvWgn/FxX34hD13A6HWGaNW7QNU1gWTbBYAg98psTzepoh9c3NCKEwKHr6LoWiXCC+oYgf5u7CK/HzV23TUKPsyU6gI2NIWzbbnI/07TQde2E+s1FRyllEwB/Ihu/lyqjpSnP3Xu+wjQt/H4Pt/9sAl07tz8GWB4O1PPw43PYf6CKqZOv5PxzcgEI1DXwyOMvsverCu64JZ/snp2595FnsWyb6/IvYeHiFSz+aA0ul5Pbbh7HTdddFnPCyoPV/PG511hesJ7yLyvQdI3Bub2ZM+teEvzeJlHCVgopBAsXF/DnOQv4Ymc5pmmSnJRIl46ZvPSn+1m3YSt/eOZVstpnADDjsTloUnLWkL7cOfUqfj/7Feb/+wOqawKEQgbpaUkMHtCbX91xLb16dOLt91bw5zkLjtE/58z+3H5LPg/NfIEdpeWMHzOC8VeMAODlV95m8UdrOGtwP+6+fRJC0KyN3Tq3Z9YTd5PVvu3XRr//iDNE7enSuT0OXaehPshVUx7g7KH96Ne7G4NzezNkYB80TeL3eaiorObVl/+FZVmcNywXIWDV2iL++NxcEhP8PPHwL6g8VM2rCxaj6xqLP1xNyDDRpCQYCnHPA7M5o39PhuT2pvJgNfmT72PF6o2kpyWRd+4gLMumaPMO6urqSfB74yJYOLzvLPuSW6c/QX19AxflDSWpTQIlpXtZWvA51TWHKdu9j4LVhaSnJWNZFqvWFlFVXYvDEZ6Vy1dtIBg0GHnBYCzT5tP1m3n51bfZtGUnyxY9R9nuLylYs5HUlKQm+h63E4C33l1O4adFdO3UPuYMBWs2Mv/vb1JTE+Du2yexs2wvt05/nPr6xiY2Llu5norKqh+uM0gpsW2bfr278uu7rucPs1+haHMJn23YgsftIsHvZdSFZ/P0Y9NJTkrgzqkTWbJ0LSvXFrF1exl9srvwzpKVoAT5V46kY4e2FG0uISM9mbr6Rvr16cZLz9zPzrK9TLntUQ5UVrF85QaG5PbmlfnvseazYrLap/PCrHu5OO9MAA5UVJGY4GuCOaL5dteefRwO1JHdoxOzHr+bzHZpAByqqkVKyeRrR9MxK4Prp87A7XIx7+XfktO3O1IKbFvxt2cfIiU5Mfb8Hy9fx+TbfsO2L3ax+rNNTLtpPN27ZnHjtEea6Ou6RihkkJKciDclCb/PE2vD7/PgTE3C7w9fK9vzFbWH6+jds3MTG6uqa2PpUwj5w0sT8eDunl9cw09GnsXSFevYuKmEtZ8XU3mohn++vpg+2V34n7tuYOCAbIYNzeHNRctY+H4B2T07sXTFOjweJ1eOHh4DcrZS1Dc0MnXKWDpkptM2PZm26cns3VdBXX0DAIWbvsC2bbJ7dOLivDOxbRuloG16cjM2hp2ib3ZXOmVlULhpB0NGTCarfVt69+rMlaOHc+Xo4Qgh8Ps8sfTn83rw+Tyxmbh+4zb+NOd1Nm0poa6uAYfDgZQapmlSUVmNrmv4vO5j9AFCIQPLsjEtC6WOgFalwngjWqD0ze5K547tmrVx7Ji8Fo0KLe4M8Sg/p293cvp2B6CmNsCl+XdTUxtgy/ayMICSkmvzR7Fw8Qo+WLqWnt06UlK6lzP69eCCcwYihEBKiVIKTdNI8HmxlSIYNNA0rUmp9c3SmUApRUbbFBbNf4rnX/43G4t3sGvPPt56dwWvLljM80/9mp/dcAXBkBFLgaZlYZgmUkq2bNnJpJsfpL4+yORrRzPygiEcqq5l5pN/xVZHCgrTtI/RjwLCI8A3bJMQgkBdfZgMiui3a5vCwvlP8ZdmbJwz6z6mXDsGy7JarHxtsRgTZhxh3fqt3HLnTBZ/tJqy3fuoqQ1QUroXwzSxLZvkNgmx6uOSi4aR278nm4pLmPnk/2LbNqNHnYfP6451YrSjoqyZjHyODirAgP49kVKybcdulixdi5QSTQuDysZgqBkuRFBTG8DtdjHzoWksnPckRSv/yaUXn4Ouaaz+tDg2YJqMlJGaxKHraFJSWLyDxmCI9plp3Dv9RsZdlkdKUiJ1dQ1NkL4Qx+pLKdF1HZfLicvpZO3nm6morOaj5etYVrCehAQflh1+ruqaw3hcx7Nx0w+3mohKY2OQF1/8F3+f9y4Z6Sl43C4OVdXS0NiI1+tmwhUjY+WXz+tm4tiLePjxOWgHJMlJiYy7LK9JPW2YJoZhNokEZuRaVK6beAlvLvqEFWsKuXHab8g7bxC2rSjeupP335hNZkZqLKQqZSOEpKS0nEsmTKd/n2506ZhJMBSiYE0RoZDJoAHZAHRo3zY2Y//rgdmkpbbhhkmXMnhANpqmcaCyiqtvfoDUlDYUFu/A7XZxOFAfC/MdMo/ST0si/4qRjB2Tx6DcbD5c9ikr1xYxaPgNBEMGbRJ8GIZJyAhHpJLSvfw0v3kbc8/o1eLOoHHTmIfdms5d7XNwS41vy0ZGecw2iT46dMzE7/dgGhYhwyA9PZmhA/vy2EO3MeL8wSilkFJi2TZdOmWy6P0CKiqrGXHeIKbdNA7LspFScKiqloWLC9A0jfGXj6BLp0xM0+TNdz6hpjbAiPMHM+zMHLxeN6NHnYsmNQ4frmPz1jL27z/IgP49mXDFSFyR+j8aYYQQmJbFtu272Lf/IFu2l7Fn7wE6ZWVwx9SJTLtpHEII0lOT8Hrd7C7fz4GKKtZt2EZOn+5c9tPzycxIo2z3PioqqkhNacP990ymsOgLgiGDcZfl0bN7R1JT2+CL1y/cSm5OL4admcPAM3pRVVVLVfVhEhN8PHr/z0lLTWLDxu0M6N+TsWPysE5g461TxoZ5CSm/E/sYVBZPf7mJRttEsPx5leRwUzZkEm00J4qW2+8YDBoYhoHUJF6P+7is4Khxv+TjFeuY++KjjL98RCwPWrZNXV0DSil8Xk+MEKqrb8CyLFwuJ26Xs0mblmURDBpfSzodiTLhXK5shcfjahaQhQyTYDCEFAKH04FD18IOZVo0NgbxR0rXmtoAAF6PG4dDb1bf6XQ0+e5woB6Px4WuaTQ2BmkMGjgdOt5IqjxZG7/VvkigxgrR5bO5VBuNLZ8mooszQkpcLgcul+PI9QjZE0XUD/7uBQqLv+CTVesZnNubUReeHYsaUZAZLQ3jI1B8ORYPCsN0tIbXq30tHR3PhMbn+XBUkjEQZ9s2ToeO06EfA5R1XcMfIbQA2iT6m2Vmm9OPVg9RDsSybNxuF2636xvb+IPFDPGLM0cvrmhxoM+2FUsL1lG+t4K8cwfxuwen4fd5YoziiRamYu2KI/v3o3T0yS5UNeUdjr/EHq1ojtbT4q4f3Vb8fY+nLyJVQ/Q7TZPH2H6yNracM0RYGPU9NN7cYESvud1Olr79HKZlxWZHfFQ4mTZOhF2+i40n+5vmVim/6T2arpI2b/v3ufSt4maYjq4JwX9mq5vH4zqGJm4VTvkWOBFeShVSs0VlwA5RFDikVGQRh1O4eSQaAlsdgVO+U1oBRYFDKmCH0GxRKR1SW2DoqDcOltkCsE+hQfF5sVVOsTNEEtIbB8tsQ0c5pLZAouzXpNDFvModar/RgCbCW6FahdN6q7wmYL/RwLzKHUoKXaDs1zSz48A9WufEXtUeBpTVHDKuSu+hSSFaD9GcxodoHEIiEEzZ/rGxmlqH1mDNDS3Z87QEMDU1XTcofT2w23HNliVGeagOh5BoEXDR+jo9XpoQOISkPFTHNVuWGK8Hdjt0g1JTU9PDdUzrwVtaD95GD95C65H81iP5kSP5rX/W0fpnHZFx/z9XwyRFQVkbnAAAAABJRU5ErkJggg=='
+  drafts: 'iVBORw0KGgoAAAANSUhEUgAAALMAAAAiCAMAAAAj8BgnAAAASFBMVEUAzqAOdnMKiHwAAAAAx5wgFUIAxJgAf38AsJ0A/38AzZ8Kj4AhDz8AxJocJ0sBuZQZN1MTV2MeG0UWR1sImIQFp4sA1KIQZmub/XSbAAAAGHRSTlP5//8Anf8nAg8CQ////v/////////////2j1zfAAADCklEQVR42u1Ya5MiIQwExtF9HCTh+f//6XWYh467e6V7n6gyZSEMkDSdhlHMNL1P08fJj2Cnj47WTG/T28mYITAbcwLaybxPZ1P9KFbNeXo3l/MgJG9Uny/mcqp+JKunizkbP5YB8Wk4zMMh7qhfmM2X8sm45j8wZ9uaLc9Czq7clWrkWnPHgU7sN9PJirjfYiYJcZ5npp8nUvvGffqT0BNiL+cVFqUY8Ojgq+nALy4xMFoSKb/BLDGIy23FfFtqZanxbOttW80GpppD4KJlXvEBb+HYrth8bTHtjc2DKSE4X3MMpd75fQAz4on2EQiX3IKt1Diw8pYTKukTHRySCPmsFXedmGsLCaWNW5ZSbAbAtyZcse2YrTjLyVvGIqWYnBC2WS3F9hYnehiz3TnC0mHWc2ThKN5YOIS3snQEysg6hLSCJo62JnaxVYmyCSZKrYI51xwCZdKOoN+JBb7ZO21ivbAoFHqg8jBmkFJ2zFyIQBp40JXQortmFB5aSaFBEruoEC3hg1VaQ2rqzYGFNT48Im3cMUMLVLrLnqBFTlvJZH6Qx/eYd1IKKKxeWVKDggtEApPaKQWxvSNu421MGSQnXlXCEBk29Bx5c/nZK10bmoBVbjBXy4a59IxBMO5xPTvlYmNFuRVIQ6RJ9mlOLiu5nWfFnLSn0SZoFqyyBdXCihleHO3yPmBu8A1aWnbKzQ1m7KSGpUT3MGZlzxGVRosbrxFr9ZkgM6eyWDDXVayV8jZTGSvVdaH6RRuEqcsK77WhmI1TFbgjz7VP8tc98cBZlzkiNTECc8xdwTO2BM8FcbAZg/rSWkMEfKG6n9BBtY3o17MtY2qY9yPgZg/Obd0ymLXzjDJJLpq/EO0T70HNDOMIK7ycIP2sSxaZxHMnAcFQ08B61t0ID1tBgaBvf6QDuV2Pd7iyTTXT3UCJGglx6hrMMpJCKvJkn3y/L3uW7l8lus1p66OvZ/+h626qP3qgg8vbEPT8O+X1W/SF+YX59Y/wX4hHvCsY8U5mxLuvEe8YR7zLHfDO/C+Xcjq81br6+AAAAABJRU5ErkJggg==',
+  company: 'iVBORw0KGgoAAAANSUhEUgAAAQgAAAAiCAMAAACUaLcpAAAASFBMVEUIl4MAzaALhnsAAAAgFUMAx5wAxJgAf38AsJ0A/38AzZ8hDj8WT2AAxJocJ0sBupUZN1MeG0UTV2MWRlsNd3MA1KIQZ2sFp4tPoWy1AAAAGHRSTlP/+v8A/50nAg8CQ////v////////////8nb1+UAAAEGUlEQVR42u1a23LjIAwF7KTb7iLu8P9/ukfC+NImu8lDpw8xMyW2kAQ6SEK1rabpfZo+LvZl2+VDIFDTr+nXRevXBULrCyCY1Pt01cW+dCv6Or2rt+sru8NwiuubersU+/KtXN7UVZ84wCeu6nICwUBc1AlCbycQ3wTE9wSa/ikgmlFKNXdHpMbY9N2RRyeO1T1qs4n5h4CIM4VAvt4EiQJRu7W2PvLgxHn27lGb6+/0U0CQj9FTiMu9LNlJX3KABYXXpjfqNnKk2fVqo/WLwXykb3pXSZ4s7IAYAvtJ3Mqv95LOHmn6H3F2Bwie2UUKprQYVaVsgQsl7Fb2AKlW7qOSu+E4fcTZnPCrWL5LirNEZmQiS+YVCMO87ESu8pXLXW9Z2XDh8w4IkzCgOLI8JcN6osneG1u544BT3idoVMyYVOcwWCQWJt52J87uAoFVOk+xNOKWHaUYaa4l8q333AdlZvacNNyIR1wNFFMgtUjWoRDiubgUfPTsaQJE5/XNgk7Q5JLoNdYPtgg6b8EIkoB1kCmKoJAClEOQmwi2kmdiQe9Khj4Q1eAItZiZHIyanwYCKhICn3yDkzlZBhbPFrAJSfq4c0WxDfy5HCStQGpQyTuOnqYV1sdXzGEYg4o7kOyqd7A10QbpNLIQAwsG1g9bkZHgSE1mArthEnbABwjxtEmgAs2xAKQyILyZm/4DBLE5gW1gh5cNFwtG2BqAnWrb5YhiJF9WMbNLLtnXp+y0eA3RnEWN6Xchlbg4/6J3sBkVurYFCLMkYwdTBRYF42KBA9XCtCVNMY2DCy3KnWa9TmfoqXN9Nkewb0toKOw5fC4j4jsQbl2bgvuFcVLwiN4DQZv2LLkXBiOWkGLUACLybbYDCNHr7MIWlaL/A1E19jvbIxA2zckovrDiFqICrgWSegoIuL/y1CNdCSUW5IcDEJozOjuiuRcaq/YGRkNeWEqxyq2hUaChraGhZcFlZXsgNDoQwyNGaDio1s4fgeD9ofTU8YkigisJgV0ghEek1ENDCoDMyc1l+sMZqe1Lg12y3MBPnFR5s9PMSXFuZSTLFNMsSVSSZel6N7ZbydIfkuUMIPy8AdGTpZWsLAVA4mCoc+pAhvxkHYFDiM9A27zsK4dczQIEyYnCy2vbGSVAyMh6fC6S3QDP56Jbjk/OFp3ZMLicZPj4JDB0vXqwCX+uFO8en5HYIyhLBxzTcny2hPM0sgNJlzuW8W7FdxsIx+1GAdP/RtXkvtQ1x1rHOfu1Dvo8+rnQ2ulfyW6v6cskbtdJJv8kuHUcc/E1/vtci9ubzfyhoF4EiB6ddxpOPfMizyMOQXRj+Hwwcz6hehiI8+Ht8vD2fJy/PM4/X/AsL3jOV37LK7/zJfDyEvj8LGD5LOD8UKR/KPIXoyvVNz0CoK8AAAAASUVORK5CYII=',
+  followup: 'iVBORw0KGgoAAAANSUhEUgAAALsAAAAiCAMAAAAwJ1jTAAAASFBMVEUfLVDV2t8EEzlNWHSSmapncIg3RGO1usUAAAB5gpYFyZ8CxJgCzKAAf38AsJ0A/39W1rlz3ca+wswHzaP9/v4Aw5gQyKAYJ0pjI3LEAAAAGHRSTlP//v///////wD/nSfpAg8C+vz/Q//+/v+KIvhSAAACfUlEQVR42u2Z23bjIAxFj7j5kqRpUoj+/09HErZxZ9JZ9bQvdI2ejKqIjTgoDsU4XsfxbS492fxm1Bhfxhclf/RjSi/UI67j6VweN8r9GN0e5Xwar7gI+mvuzV4F/oLLfO4PXeDP8wWn8sg92qOcMJdbl+y3MqMU6pKdSkGnklHR/Dx2Gsx2aqIYKQ9++q6Zj6QKPhxg9w5ObPcRghtycPgu9g9SPcWMLh1gj0CMWukdOws70rexP081Of9J58fsW3TwgJc1EEPrnnYuq5EuUPS0E1aOftCnISKFTXFgpEEfEpu3pbIK0ZQkaQ6JET21MK1iOMoO1bs+sPeO7zv2zaUpRUqh1YWco+oiQKKwqs67FD2LO8kDXFzYJ8dR5Cmf8ZoU5FkMIW9hOlmSVIc0w6p3Ik0kM/uVHfmdKwfmKIMFkZiliFIplVisUWaJNYKUWBfHtKRiSzXpSDdl3fAlDFQjEvxxvedBp1mRK3tzZTjRglQLuL9j17pruEbRso8MH0jzamUloKaqI980WrdwC7Nl7hT8Oc2k5UT9jV3qnWLgwAthZacn7CLsZIy1JnFNVUfhCbv9gYYvsO8EYn1G3M2lQw4y3uRoWzyxaQZ7zegKgkpMxSBDWlJJzmW0aGZqmsn5nv9JM2tH/f2sYnNZ79E6g9v3QHJ61qzuIpJ2VmX2mLQCyZm76l1IzR+2sypu9pFamJ1VPsbOf/RIyAKCuVeX1FWbdNwkI1Ee/m4NRQq265HSAdmaofRCVX5uqTgtfu2R1kxVd2tY7ZGH+szX3/IA6vVdrJ7VTtmtQfx/B/6h7B3/5uv5t3bPdxw93y31fKfX811qz3fYHf/v4BeC1b/J9Hc7UwAAAABJRU5ErkJggg==',
+  allfu: 'iVBORw0KGgoAAAANSUhEUgAAALUAAAAiCAMAAAAu7mhgAAAASFBMVEVNWHMEEjkeLE7W3OCUmqtqc4o4RGO0ucQAAAB6g5cFyZ8CxJgCzKC9wswAf38AsJ0A/39W1rlz3cYHzaP9/v4Aw5gQyKAYJ0qnCQPQAAAAGHRSTlP////+/////wD/nSfp/wIPAvr8Q//+/v8Bp5//AAACcUlEQVR42u2YDXPbIAyGhcSH7Xy0TU34//90r4RjnK31krvuNrbprg4GJB6EpCbQMLwOw/uU+5Dp3XhpeBlelPnagyg3eAd6HQ7HfL3I3IPI5ZqPh+GVzoB+m/uRN2Cf6Twde4IG9nE60yFf577kmg805Utn1Jc8Uc7SGbXkTN0FiIbI30UtKVnkSAgyJxq3Y5783gH6sB23yfsaX0dNzrExsEuzr+2bBBd3bJIrzm9fw/L49dRSIMmo8eH5DnN0tOPqqvdbqL2LdSUprL5eqQOzN+qxnbwn5rBUIqFSCC8n9Nlgo5YQS8SQBZ1o0LXAadbw8DCHvkRcmOQJanIeYSE/UAdXKHIBNbtRX5XflUA2WXfAOCSXEFhEFikrtUTHgVUhot+7Itao0qxFVyI0g65MgcoT1NA44c9/T43jR19ksn3VdWofuXEbIaQA2IE0avMCduOxzTDjSBKmSvPSQk0ajR4jwlG99kSEWL7ZyvfUSTluPlnWwXlqEtxi3VAMruqu1KZlreSiwO1jslWg7pu1JZhUk+H14J+gZszH6ej6j1AHFb9Sn35CLcgNTkTBhj6h9rOMGHP+YWrAOYipWg35KEKQKCeN8KVoiGx8vR8hCA+M+MK8Iq3WWoRYcHxYfD6hRm4lCAF28TVvs7FwzcGCda2FtFkTS1MC+y472aj24gzIlmrNGnZ0y0ZNxsd9LbHYXHgDOYED94XuKp++Sm2FWvmspFVltmrSKl8Zl8et8tkc3QVvyv5qDRuslU9ggaPv43vIA/+Q/lN/FXUZ/7Vvqn86dZe/wPr8tdvnzUKftzh93pj1eTvZ501wl7fu3wBZZLLzTvzT/wAAAABJRU5ErkJggg==',
+  sync: 'iVBORw0KGgoAAAANSUhEUgAAAIMAAAAiCAMAAABLA5ofAAAASFBMVEXX3eEcKk1PWnWWna0FEzpmcIc4RGIAAAC2usUFyZ8CxJgCzKC9wct5gpYAf38AsJ0A/39W1rlz3cYHzaP9/v4Aw5gQyKAZJ0qL7C8eAAAAGHRSTlP+////////AP+dJ+n//wIPAvr8Q//+/v8enQNwAAAB80lEQVR42uWY7W7CMAxFbSdOU2iBsbR5/zfddVLKNk1Tux800iw1wmDsE3/QBuq6W9e999MR0r+X6NRdu6sRzK8Xo0D0jm7d6TzNd0qvF7rP0/nU3egChLd0lLwB4kKX/nwcAiDO/YVO05yOlHk6UT/dD2W4Tz1NEx3KYAAHl8KK0TBDHFUdHcqg3iTvgCBV+k3fzUA5a3RO9jB4pt/03QyRHw60cGDFvgbl4Mz9GJjlYSqcWShKziIuuQAVGXjoI67kbFkM9+Qh1HZQj2ARVSHmDAEbiYf7BZLgV6E4bx9qElZlH5LjqrMfq5NqmLczJJetHbAf0BB8aCLOYiDYqueI4NVw4EBFibn4t2uwl4su3lWG1XD7XJBTzvZ9c8IISrakAK2kZrVjbylLFRbxkfFspIseHgyr4b7fh4BcYtcSOZSk/8SA5hBmvFs2b1bqnDEM3xhWw839oBFlCCgBvOTiB7VYGL7UItWE6xLTWTO7/GQQtOGAMj4NNzOgGVCK4sW6jT7n4VtPWqfZu+g5iahYEF51zEXpVZan4WYGJwHOYq14mUPkYcBGsvs6m4QE14nFVHKZTYnBUlZ1Uqxj1k+Gf7lfyE/wL71nqWDaD2YIWegf37tfzNDAs1wLz7QtPNu3cMZp4azXwpm3hbN/A/+BfADC1jynRnHmZQAAAABJRU5ErkJggg==',
+  undo: 'iVBORw0KGgoAAAANSUhEUgAAAJgAAAAiCAMAAACUTeAAAAAASFBMVEXy2t7bmKOrCiTBS1/ReIe3KkIAAADovMO+QlatHja6KkF/AAC1Jz60KUG+KUCqVVX/AAD/AH/+/f2yHDW5MUi0IzvGWGrLZ3hd14pLAAAAGHRSTlP+/v////cA//8cmgKmPkMDAgL//v78//6eNdC0AAACMklEQVR42u2Yf2/cMAiG8a/Ed9d2bQDz/b/pAOfSTXOr5rQ/vKmWTnJIDI+BvLkEluVtWV6ujJMMvr44Eiw/loth0STD0C4KBa/LpSAF2CYZEAjLZXmFm3LJNFiOJkp2g9sTyjbZEHy6wTMTzAYGxM9wxbBNNwJegRHmAwNkQNomHIT/GNjqugYDdQvtCy25Sj4hDiOx+gAMOJpniu2PUznWL/RuLEPzaFNrxBNg5LdqGihcHsAObqphf+SYxn1+Biw7WPNtBiIvTaYSOlhITO3wF4gLhW4uVpgOBq1wMjPkyqXZZSS6CrJOQl9YJDwKViMjY1RHErnVgsm2ji3hvQRaOJFSzcySYoEOtiI2QU09JF3YCBoysx7XSEJRjB+Twj8I1rAA2AzMqa5I+yzdi5otyAa7uWl7OljqsUl/vNr5vZQh6qMGim7L/eeTGQsHmPk3lz3n77OjkXTjJWXLE3tyk8XW0GxD83q0Vp/oI3qvgUdZz4BtPWNkzW8Z+BxM1SFpKFCz6MhhB8NkRxnkHaw5GJld1kfAGmq6w1Eax/mwlNBzvAJ6ngF+KaUGHpbSLztfSmtcLOgeDrDe/Dxofm3yZO7NLDX2jKmPWEV3eDS/mrkJQNWbpZUI9+Y/oWPqtRHVDJ687LF3ueiz3+QiVJWLtrq5cE0WMbmmqyyYpu5y4QbuclFcR1RAJBSC/+BZ+Q32DfYXwab9az3ty8i0r2/TvvBO+4lg2o8q036GmvXD3U9icVfbPOzyygAAAABJRU5ErkJggg==',
+  drive: 'iVBORw0KGgoAAAANSUhEUgAAAM0AAAAiCAMAAADLcK0MAAAASFBMVEUeLE7X3OEEEjlMV3Jpc4qVm6w5RWO0ucQAAAB6gpcFyZ8CxJgCzKC9wcsAf38AsJ0A/39W1rlz3cYHzaP9/v4Aw5gQyKAYJkovVBtsAAAAGHRSTlP//v///////wD/nSfp/wIPAvr8Q//+/v8FDva1AAADCElEQVR42u2Z0XLjIAxFJUBgJ3Hapnb4/z/dK4Ft3KnbZmf2Id4yU5wxltCRLpA61HWvXfd+mp67nd6Ng7qX7kVZ7s/clAccHb1258t0v/H4zI1v9+ly7l7pCpi38fnbG3CudD1djgADnMvpSufpPh6j3acznabbQWhu04mmiQ9Cw9NEhxGaSu3/oGEJQaBB8bJrvR3jlNKwUS2H8IWKMfr5MBzx3I+lrxH1/Hc0kp22NEYXdq39Zsw7ci5T34SlDnZhssuZd0aQJXGlp/pMwvNE8jc0QjlKkigfIv6KJhAF/DnfxMX7yRQX+Su/IWd46hd3hJuyw/8NTcwlJayeBWEWYeGD3uY+Evk6q/hajeCiyicjfxBRCllGSIm9mpjmOETkaIbBFCEUp748YSbaevWEKahJGBsI2YwwbSXwHQ2vgvGZcrbS9y4Hr4Vn77L3pKQ9GGYpGM3IyokORmJKM9uAFHN0MdAcndcnSJ16uBtmkyIqyswUescIXxaaVJxDfNBA/DlNyotAQTOw1whtLgWAu6Rl08SFVS+FZrRnIVSoDJdUtBLhz6SFW9wojW0i7xaTEjm5xE6Sk/VxLGCfTH3BEsIP1UZaDWtEYsnLzluiZ1JaV0lLU+xxSSaRQQsYqgNZaGx9si31dkqdVMQxQ+RO1QZD0bo4my859OERGsr+E5qgTTY0mXhLg6iCdsNMo6FZOkN1kPZohiYx3mOAolat0ozjkFilMabgAcY/3wUC1gh0IGmlMeHqNvVBadQojTlFXa3IxlCSMljYNWYTJXNDs1Ha0Gyplk7wrwWzw8ecl9WZHjhvvB4dqoqFBh0KHHGr2QXC6BccrGvSE0fmotQL4jQ9YhcgmLmWRtNWd4HcxIfMaRHENQULpCXRIyh7fHqkNnXnxNnrc28Oyq0cbb+dd2gd87nuA9ibZ0HXxVsvoWYYZuBatugi5mWH3sTnqeSB1jNJ1Lsap6jpSf/qexr/fuv8pfmleW6aQ/0nfay3HMd6A3Wst4PHenN7rLfqx/rF41C/Rv0Bd1HquzyXDMgAAAAASUVORK5CYII=',
+  refresh: 'iVBORw0KGgoAAAANSUhEUgAAAL0AAAAiCAMAAAA9OSiUAAAASFBMVEUfLU/W3OCSmapOWXQFFDtocYg5RWO1ucUAAAB7g5gFyZ8CxJgCzKC9wswAf38AsJ0A/39W1rlz3cYHzaP9/v4Aw5gQyKAYJkpJp7RNAAAAGHRSTlP//v///////wD/nSfp/wIPAvr8Q//+/v8FDva1AAACyElEQVR42u2Z21LjMBBEZ3S1cwOCHP3/n273yE4AO0uZp9UWqqKQZWl03NOjECPD8DoM74epr3Z4N24ZXoYXst96auQH9yCvw/E03a5aemp6vU2n4/AqF8C/lf7aG/AvcjmceoQH/ulwkeN0K32223SUw3TtlP46HWSatFN6nSbp1ji0zv9In9m+OkpjjE9dplv3Rp+3gvtx1fvOJJs7P6HXKiGEmvTzYKj1Ob2ENakEtzHVBVn1vmk5yA56qSn6GvznTdNf6htL1neTbNJLWvW+077uoqdoXkivXsTjyqUqMRbnneO4wzCzqVGqpIz41UVJd1osSzkhDDq1jWf2vFKGs2eHvZysV87zNtgHsxgZtsIK5UB0m1l/Si+xaAoRMbBhrKDA1hUK+FCRmDKGGj3T6QOz5EjfJtyfX8AjvOGZxpH6sQcc4cyQqD2QhWEyEm2zsE+MYjdhVEDDNJ5773IO4lYq4PkIluHmHA+NVak0741F2ClKeq8qi1VcQ1ouRwRQ4XolPUKYmujllmhPlzq6zxJR67lgRlRtd6Lspcfi1qNQYgkvpQWb5WNhROTCO2W6ULVpKdNo08yAsBxiCClRTW5+MjV6q1oKZDMxls1flSpgD11inPfRI6CjX0DvY7SjcqGPjd5GyeITnwK+2KYHocuRJDrCSzaSyhN6OeMnorJknvYzejEHykJbWond6U0lswGDOiprI3f6h3PmzIvFsOUf6NfOMcVdfdD/xDmsn0wFUE4oy1ZFD3pULUqQrMl+r7RvVVtN6Yp6tOez8nVNcTthWZhfqhZx0rJQZh32Vm2yWvTVl3bi8TPT8Qpj7eMRJyZcrGWcDzjQnHnXfTwx7RK6jw7HFI9eOzotkDaNPbRenZg+J+Sk7VfaiSk7zvvfv9J+6X/p/2n6rr8Z9v2tvO83In2/jer7TWDfb2H7fgPe9X8f/gBS+cHokq6toAAAAABJRU5ErkJggg==',
+  today: 'iVBORw0KGgoAAAANSUhEUgAAALMAAAAiCAMAAAAj8BgnAAAASFBMVEUQZ2sAzaAAAAAKin0Ax5wgFUIAxJgAf38AsJ0A/38AzZ8JjoAhDz8AxJocJ0sBuZQZNlMUVmMeG0UFposWRlsA06IIl4MNd3Oz3nzbAAAAGHRSTlP/+AD/nf8nAg8CQ////v////////////8eMVyjAAAC0ElEQVR42u1Y23LjIAwVxk6atgiJ6///6UpgJ3ab6XjzsDvMlEmIjSVxJI5kAkzTbZreZzdCm98bWpjeprfZmCEwGzML2glu08VkN0rL5jLd4HoZJMhbqC9XuM7ZjdTyfIWLcWM1c4F5OMwzuPHaL+b/iNkXbfEVc1yeDZ+25Znji5gxhCVg+kk9PrPuaanP7AU2J7R1HJfyImbCBAkDa5o+Elaf3MtkCRh7ZffboPxSqLshs/Ye4SC4034o+44ZFfPx0UnMAbJLmJyzDBoV8K4wlERb7EtCZBaANSE1QsREVFKo2TMhpup8I0rr1XvVoOQP2lUkSSMeRYfoIyvmLItgD+JnMbtIi8wEn+SNXSQqdUFpIXWRqjfIGQJyChIc0SEFW2XexIwLZP5UqBJR9xE1gswJ40E7ETMFQcZBdaBh9jrxQfwkN1A+LF6CWixIghllhQE3M6WtYlSQLoWUaxAZGax9TSGQPoziFK/y4vx9vZu2b1Rrl4Q2K7nUXpKA5aP4ScyIjYQrZo1zIK+gHpjlyrZeAYKugG98FrpIIy++VGF42dZOaGDdXlsI0GaymRchQm2Y+7xH8bPcqKjzK5Rsw4rZncCsJKoFBLPoJavYu1EQgMHutSMGKFYGs6vCq8AdM38T/4sclGmr0MInfI45P+NG5sA5s2KV9VoLiVaBnIW2vNPO6pARtz9cdO2uc0Pz6Ch+Ns4SQwlawd4emMtWSSXV7Lcc7HFOqXHD1XD3sWfm5kHTLlFLA2o0qSejRr70CnAQP8dnFZZi56UcEdieg2s2rkLyIFTztdZhNR4IoTbMYojvb7heAffa2RIlS+IxELWiF+UmF9H/In5iv+F7wrZeu/71Xwr9er1/p/iDiri9Z+SxCqxT3C92xr5P9c/2SJJGgfxY+zrdAkQ32F7Ue/e7fx4Y84j/YUc8KxjxTGbEs68RzxhHPMsd8Mz8D5QgPIeehgwqAAAAAElFTkSuQmCC'
 };

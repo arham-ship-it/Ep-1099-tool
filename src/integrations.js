@@ -112,18 +112,65 @@ PDF text layer (may be empty): ${String(text).slice(0, 6000)}`;
 }
 
 /* ------------------------- Google Sheet email tracker ------------------------- */
-/** POSTs vendor rows to the Sheet's Apps Script web app (doPost). Response can't be read (no-cors). */
-export async function sendToSheet(settings, company, taxYear, sender, rows) {
-  const body = JSON.stringify({ k: settings.sheetKey || '', c: company, y: taxYear, s: sender, r: rows });
+/** POSTs vendor rows to the Sheet's Apps Script web app (doPost). Response can't be read (no-cors). meta = {paid, folder}. */
+export async function sendToSheet(settings, company, taxYear, sender, rows, meta) {
+  const body = JSON.stringify({ k: settings.sheetKey || '', c: company, y: taxYear, s: sender, r: rows, m: meta || {} });
   await fetch(settings.sheetUrl, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body });
 }
-/** GET fallback link (opens a confirmation page in a new tab). Split when long. */
-export function sheetLinks(settings, company, taxYear, sender, rows) {
+const b64url = s => { const bytes = new TextEncoder().encode(s); let bin = ''; bytes.forEach(b => bin += String.fromCharCode(b)); return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_'); };
+export function fromB64url(s) {
+  const bin = atob(String(s).replace(/-/g, '+').replace(/_/g, '/')); const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+/** Link(s) that add vendors to the Sheet (opens a confirmation page in a new tab). Split when long. */
+export function sheetLinks(settings, company, taxYear, sender, rows, meta) {
   const base = settings.sheetUrl.split('?')[0];
-  const enc = s => { const bytes = new TextEncoder().encode(s); let bin = ''; bytes.forEach(b => bin += String.fromCharCode(b)); return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_'); };
-  const make = rs => `${base}?k=${encodeURIComponent(settings.sheetKey || '')}&d=${encodeURIComponent(enc(JSON.stringify({ c: company, y: taxYear, s: sender, r: rs })))}`;
+  const make = rs => `${base}?k=${encodeURIComponent(settings.sheetKey || '')}&d=${encodeURIComponent(b64url(JSON.stringify({ c: company, y: taxYear, s: sender, r: rs, m: meta || {} })))}`;
   const out = []; let cur = [];
   for (const row of rows) { cur.push(row); if (make(cur).length > 6500 && cur.length > 1) { cur.pop(); out.push({ url: make(cur), n: cur.length }); cur = [row]; } }
   if (cur.length) out.push({ url: make(cur), n: cur.length });
   return out;
+}
+/**
+ * Link that asks the Sheet (running as the signed-in Google user) to look in the client's Drive folder
+ * for W-9s. Needs no Google Cloud setup. The result page links back to this app with #w9=<matches>.
+ */
+export function driveCheckLink(settings, company, folderUrl, vendorNames, returnUrl) {
+  const base = settings.sheetUrl.split('?')[0];
+  return `${base}?k=${encodeURIComponent(settings.sheetKey || '')}&action=w9&c=${encodeURIComponent(company)}&f=${encodeURIComponent(folderUrl)}&r=${encodeURIComponent(returnUrl)}&d=${encodeURIComponent(b64url(JSON.stringify(vendorNames)))}`;
+}
+
+/* --------------------------- online vendor research --------------------------- */
+export const RS_LABEL = { us_corporation: 'US corporation', us_llc: 'US LLC', us_partnership: 'US partnership / LLP', individual: 'Individual / sole proprietor',
+  law_firm: 'Law firm', foreign: 'Foreign company or person', government: 'Government body', nonprofit: 'Tax-exempt organisation', unknown: 'Not found' };
+/**
+ * Quick Google-search check of what kind of entity each vendor is (Gemini with Google Search grounding).
+ * vendors = [{name, hint}] (max ~8 per call). Returns [{name, k, c, note}] — k is a key of RS_LABEL, c = high|medium|low.
+ * This only narrows the list (corporations, foreign, government); the W-9 is still the proof.
+ */
+export async function researchVendors(vendors, companyName, settings) {
+  if (!settings.geminiKey) throw new Error('Add a Gemini API key in Settings to research vendors online.');
+  const prompt = `You help a US accounts-payable team decide which vendors may need an IRS Form 1099.
+For each vendor below (paid by ${companyName}), use Google Search to find what kind of legal entity it is.
+Return ONLY a JSON array, one object per vendor, in the same order:
+[{"name": "<exact name given>", "k": "us_corporation|us_llc|us_partnership|individual|law_firm|foreign|government|nonprofit|unknown", "c": "high|medium|low", "note": "<max 18 words: what it is, where it is based>"}]
+Rules: "us_corporation" only if you find it is incorporated (Inc., Corp., a public company, or a known corporation). An LLC is "us_llc" (its tax type is unknown without a W-9).
+"foreign" if it is based outside the United States. Law firms are "law_firm" even if incorporated. A private person is "individual". If you cannot find it, use "unknown" with "c":"low". Never guess.
+Vendors:
+${vendors.map((v, i) => `${i + 1}. ${v.name}${v.hint ? ' — paid for: ' + v.hint : ''}`).join('\n')}`;
+  const model = settings.geminiModel || 'gemini-2.5-flash';
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(settings.geminiKey)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], tools: [{ google_search: {} }], generationConfig: { temperature: 0 } })
+  });
+  if (!r.ok) throw new Error('Gemini ' + r.status + (r.status === 429 ? ' (rate limit — wait a minute)' : ''));
+  const j = await r.json();
+  const text = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+  const m = text.match(/\[[\s\S]*\]/);
+  if (!m) throw new Error('No result returned');
+  const arr = JSON.parse(m[0]);
+  return vendors.map((v, i) => {
+    const x = arr.find(a => String(a.name).toLowerCase() === v.name.toLowerCase()) || arr[i] || {};
+    return { name: v.name, k: RS_LABEL[x.k] ? x.k : 'unknown', c: /^(high|medium|low)$/.test(x.c) ? x.c : 'low', note: String(x.note || '').slice(0, 160) };
+  });
 }

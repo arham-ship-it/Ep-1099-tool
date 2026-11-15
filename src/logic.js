@@ -32,6 +32,12 @@ export const ENTITIES = ['Unknown', 'Individual / Sole proprietor', 'Single-memb
   'LLC - S Corp', 'C Corporation', 'S Corporation', 'Trust / Estate', 'Exempt / Government', 'Foreign (W-8)'];
 export const S = { ELIG: 'Eligible', W9: 'Needs W-9', REV: 'Needs review', NOT: 'Not eligible' };
 
+/** 1099 filing due date: Jan 31 after the tax year, moved to Monday when it falls on a weekend. */
+export function filingDue(taxYear) {
+  const d = new Date(Number(taxYear) + 1, 0, 31);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+}
 export const latestYear = () => Math.max(...Object.keys(RULES).map(Number));
 export const rulesFor = y => RULES[y] || RULES[latestYear()];
 
@@ -74,20 +80,65 @@ export function yearOf(v) {
 }
 export function suggestCategory(name) {
   const n = String(name || '').toLowerCase(); if (!n) return '';
-  // Standard chart of accounts: 1xxx assets, 2xxx liabilities, 3xxx equity, 4xxx revenue -> never vendor expenses
+  // Balance-sheet and revenue accounts (1xxx-4xxx) are not vendor services, with two exceptions that are
+  // usually paid to service providers: capitalised patent work (attorneys) and leasehold improvements (contractors).
   const num = n.match(/^\s*(\d)\d{3,4}\b/);
-  if (num && '1234'.includes(num[1])) return 'Not Reportable';
+  if (num && '1234'.includes(num[1])) {
+    if (/accumulated|depreciation|amortization/.test(n)) return 'Not Reportable';
+    if (/patent|trademark/.test(n)) return 'Legal Services';
+    if (/leasehold improvement/.test(n)) return 'Services';
+    return 'Not Reportable';
+  }
   if (/settlement/.test(n)) return '';
-  if (/legal|attorney|law firm|lawyer|litigation/.test(n)) return 'Legal Services';
-  if (/contractor|subcontract|consult|freelanc|professional fee/.test(n)) return 'Services';
-  if (/equipment|hardware|meter|controller|batter|thermostat|\baws\b|hosting|workers comp|bonus|deposit|discount|refund|bad debt|exchange|gain or loss|incentive|cost of sales|\bdivvy\b|\bbrex\b|\bramp\b/.test(n)) return 'Not Reportable';
+  if (/legal|attorney|law firm|lawyer|litigation|patent/.test(n)) return 'Legal Services';
+  // payroll, benefits and wages are never 1099 (they go on W-2)
+  if (/salar|wage|payroll|benefit|401k|401\(k\)|pto|vacation|sick|bonus|workers comp|stock equity|equity comp/.test(n)) return 'Not Reportable';
+  if (/contractor|subcontract|consult|freelanc|professional fee|accounting|bookkeep|taxation service|tax service|tax prep|audit/.test(n)) return 'Services';
+  if (/install|repair|maintenance|testing|certification|engineering|recruit|staffing|affiliate|commission|referral|website|web dev|photograph|design|cleaning|janitor|landscap|security guard|it support|labor/.test(n)) return 'Services';
+  if (/advertis/.test(n) && !/paid media/.test(n)) return 'Services';
+  if (/sponsor|conference|event|trade ?show|paid media|hubspot|shopify|affirm|selling fee|merchant|platform fee|customer compensation|charit|donation/.test(n)) return 'Not Reportable';
+  if (/equipment rental|\brent|lease/.test(n)) return 'Rent';
+  if (/equipment|hardware|meter|controller|batter|thermostat|\baws\b|hosting|deposit|discount|refund|bad debt|exchange|gain or loss|incentive|cost of sales|\bdivvy\b|\bbrex\b|\bramp\b/.test(n)) return 'Not Reportable';
   if (/royalt/.test(n)) return 'Royalties';
-  if (/\brent|lease/.test(n)) return 'Rent';
   if (/medical|health ?care|clinic|physician|doctor/.test(n)) return 'Medical';
   if (/prize|award/.test(n)) return 'Other Income';
   if (/payable|receivable|checking|savings|\bbank\b|undeposited|clearing|sales\b|revenue|income|equity|retained|capital|loan|note payable|accrued|deferred|prepaid|credit card|owner|draw|distribution|opening balance|fixed asset|accumulated|^\d*\s*(cash|petty cash)\b/.test(n)) return 'Not Reportable';
-  if (/cogs|cost of goods|inventory|freight|shipping|postage|utilit|electric|telephone|phone|internet|payroll|wage|salar|benefit|travel|meal|airfare|hotel|software|subscription|saas|bank|merchant|interest|insurance|tax|depreciation|amortization|supplies|materials|equipment purchase|reimburse/.test(n)) return 'Not Reportable';
-  if (/consult|contract|professional|freelanc|service|labor|commission|subcontract|design|accounting|bookkeep|audit fee|repair|maintenance|cleaning|janitor|security guard|landscap|it support|marketing|advertising agency|staffing|temp/.test(n)) return 'Services';
+  if (/cogs|cost of goods|inventory|freight|shipping|postage|utilit|electric|telephone|phone|internet|travel|meal|airfare|hotel|software|subscription|dues|licen[sc]e|saas|interest|insurance|tax|depreciation|amortization|supplies|materials|collateral|tooling|scrap|landed cost|reimburse/.test(n)) return 'Not Reportable';
+  if (/service|marketing/.test(n)) return 'Services';
+  return '';
+}
+
+/* ---------------- double-entry GL helpers (cash basis) ---------------- */
+/** 'bank' = cash accounts payments leave from, 'card' = credit-card accounts, 'ap' = accounts payable, else 'other'. */
+export function acctKind(name) {
+  const n = String(name || '').toLowerCase();
+  if (!n) return 'other';
+  if (/accounts payable|\(a\/p\)|\ba\/p\b/.test(n)) return 'ap';
+  if (/credit card|\bamex\b|american express|\bvisa\b|master ?card|\bdivvy\b|\bcard\b|ramp card|brex card/.test(n)) return 'card';
+  if (/charges|fees|interest|in transit|supplier deposit|security deposit/.test(n)) return 'other';
+  if (/checking|savings|money market|\bbank\b|petty cash|^\d*\s*cash\b|treasury|vault|money out clearing|bill\.com.*clearing|operating account/.test(n)) return 'bank';
+  return 'other';
+}
+const SKIP_TXN = /journal|transfer|^invoice$|^payment$|receive payment|sales receipt|credit memo|inventory|credit card payment|estimate|statement|purchase order/i;
+/** True when the file is a full double-entry ledger (has transaction type + split and bank-account lines). */
+export function isLedger(rows, idx) {
+  if (idx.txnType === undefined || idx.split === undefined || idx.account === undefined) return false;
+  let n = 0;
+  for (const r of rows) { if (acctKind(r[idx.account]) === 'bank' && /bill payment|expense|check/i.test(String(r[idx.txnType] ?? ''))) { if (++n >= 3) return true; } }
+  return false;
+}
+
+/**
+ * IRS "eyeball test" (Treas. Reg. §1.6049-4(c)(1)(ii)(A), applied to 1099-NEC/MISC by §1.6041-3(p)):
+ * a payee whose name contains an unambiguous expression of corporate status (Incorporated, Inc.,
+ * Corporation, Corp., P.C. — but NOT "Company" or "Co.") may be treated as a corporation.
+ * Also spots likely government / university payees and likely foreign companies.
+ */
+export function guessEntity(name) {
+  const n = ' ' + String(name || '').toLowerCase().replace(/[.,]/g, ' ').replace(/\s+/g, ' ') + ' ';
+  if (/ (inc|incorporated|corp|corporation|p c|pc) /.test(n.replace(/-/g, ' '))) return 'corp';
+  if (/ (university|college|city of|county of|state of|department of|dept of|authority|commission|school district|u s |united states|internal revenue|franchise tax board|secretary of state|comptroller|public utilit) /.test(n) || / (cdtfa|irs|uspto|dmv) /.test(n)) return 'gov';
+  if (/ (ltd|limited|gmbh|s r o|pte|b v|s a|ag|oy|ab|s p a|srl|sarl|kk|pty|co ltd|shenzhen|guangzhou|dongguan|shanghai|hong kong|taiwan) /.test(n)) return 'foreign';
   return '';
 }
 
@@ -100,10 +151,11 @@ export const ALIASES = {
   accountName: ['account name', 'account description', 'gl account name', 'account title'],
   amount: ['amount', 'net amount', 'paid amount', 'payment amount'],
   debit: ['debit'], credit: ['credit'],
-  method: ['payment method', 'method', 'pay method', 'payment type', 'payment mode', 'split', 'payment account']
+  method: ['payment method', 'method', 'pay method', 'payment type', 'payment mode', 'payment account'],
+  split: ['split', 'split account', 'offset account']
 };
 export const FIELD_LABELS = { company: 'Company', date: 'Payment date', txnType: 'Transaction type', vendor: 'Vendor', account: 'GL account', accountName: 'Account name',
-  amount: 'Amount', debit: 'Debit', credit: 'Credit', method: 'Payment method' };
+  amount: 'Amount', debit: 'Debit', credit: 'Credit', method: 'Payment method', split: 'Split (paid from / to)' };
 
 /**
  * Turns a raw sheet (array of rows) into {headers, rows, companyHint}.
@@ -168,39 +220,55 @@ const lineAmount = (r, idx) => idx.amount !== undefined ? toNum(r[idx.amount]) :
 const lineCompany = (r, idx, def) => idx.company !== undefined && String(r[idx.company] ?? '').trim() ? String(r[idx.company]).trim() : def;
 const inYear = (r, idx, y) => { if (idx.date === undefined) return true; const ly = yearOf(r[idx.date]); return !ly || ly === y; };
 
+const txt = (r, i) => i === undefined ? '' : String(r[i] ?? '').trim();
+const methodOf = (r, idx) => idx.method !== undefined ? r[idx.method] : (idx.split !== undefined ? r[idx.split] : '');
+
 /** Distinct GL accounts (per company) for the mapping step. */
 export function listAccounts(rows, idx, taxYear, defaultCo) {
+  const ledger = isLedger(rows, idx);
   const m = {};
   for (const r of rows) {
-    if (!inYear(r, idx, taxYear) || isCustomerTxn(r, idx)) continue;
-    if (!String(r[idx.vendor] ?? '').trim()) continue; // lines with no payee can't create a 1099
-    if (idx.method !== undefined && isCard(r[idx.method])) continue;
+    if (!inYear(r, idx, taxYear)) continue;
+    if (!txt(r, idx.vendor)) continue; // lines with no payee can't create a 1099
+    const acct = txt(r, idx.account), an = txt(r, idx.accountName);
+    if (ledger) {
+      const type = txt(r, idx.txnType);
+      if (SKIP_TXN.test(type) || /bill payment|deposit/i.test(type)) continue;
+      if (acctKind(acct) !== 'other') continue;                         // bank, card and A/P sides
+      if (!/^bill$|vendor credit/i.test(type) && acctKind(txt(r, idx.split)) === 'card') continue; // paid by card
+    } else if (isCustomerTxn(r, idx) || isCard(methodOf(r, idx))) continue;
     const co = lineCompany(r, idx, defaultCo);
-    const acct = idx.account !== undefined ? String(r[idx.account] ?? '').trim() : '';
-    const an = idx.accountName !== undefined ? String(r[idx.accountName] ?? '').trim() : '';
     const k = co + '|' + acct + '|' + an;
     m[k] ??= { co, acct, an, total: 0 }; m[k].total += lineAmount(r, idx);
   }
   return Object.values(m).sort((a, b) => a.co.localeCompare(b.co) || String(a.acct).localeCompare(String(b.acct), undefined, { numeric: true }));
 }
 
-/** Roll GL lines up to company -> vendor. map keys are "company|account|accountName" -> category. */
+/**
+ * Roll GL lines up to company -> vendor. map keys are "company|account|accountName" -> category.
+ * For a full double-entry ledger this is CASH BASIS: only money that actually left a bank account counts.
+ *   - Bill Payment lines on bank accounts  -> paid; split across categories by the vendor's bill mix
+ *   - Expense / Check lines paid from bank -> paid, category of the expense account
+ *   - anything paid from a credit-card account -> excluded (1099-K)
+ *   - journal entries (payroll, accruals), transfers, invoices, customer payments -> ignored
+ *   - unpaid bills -> ignored (shown as a note)
+ */
 export function aggregate(rows, idx, taxYear, defaultCo, map) {
+  if (isLedger(rows, idx)) return aggregateLedger(rows, idx, taxYear, defaultCo, map);
   const cos = {}; let skipped = 0;
   for (const r of rows) {
-    const vendor = String(r[idx.vendor] ?? '').trim(); if (!vendor) continue;
+    const vendor = txt(r, idx.vendor); if (!vendor) continue;
     if (!inYear(r, idx, taxYear)) { skipped++; continue; }
     if (isCustomerTxn(r, idx)) continue;
     const amt = lineAmount(r, idx); if (!amt) continue;
     const co = lineCompany(r, idx, defaultCo);
     const key = normalizeVendor(vendor);
-    const acct = idx.account !== undefined ? String(r[idx.account] ?? '').trim() : '';
-    const an = idx.accountName !== undefined ? String(r[idx.accountName] ?? '').trim() : '';
+    const acct = txt(r, idx.account), an = txt(r, idx.accountName);
     const label = (acct + (an ? ' ' + an : '')).trim() || '(no account)';
     cos[co] ??= {};
     const v = cos[co][key] ??= { n: vendor, k: key, t: 0, x: 0, c: {}, u: 0, ua: [], nr: [] };
     v.t += amt;
-    if (idx.method !== undefined && isCard(r[idx.method])) { v.x += amt; continue; }
+    if (isCard(methodOf(r, idx))) { v.x += amt; continue; }
     const cat = map[co + '|' + acct + '|' + an] || '';
     if (!cat) { v.u += amt; if (!v.ua.includes(label)) v.ua.push(label); continue; }
     if (cat === 'Not Reportable' && !v.nr.includes(label)) v.nr.push(label);
@@ -209,11 +277,76 @@ export function aggregate(rows, idx, taxYear, defaultCo, map) {
   return { cos, skipped };
 }
 
+function aggregateLedger(rows, idx, taxYear, defaultCo, map) {
+  const W = {}; let skipped = 0;
+  for (const r of rows) {
+    const vendor = txt(r, idx.vendor); if (!vendor) continue;
+    const type = txt(r, idx.txnType);
+    if (SKIP_TXN.test(type)) continue;
+    if (!inYear(r, idx, taxYear)) { skipped++; continue; }
+    const amt = lineAmount(r, idx); if (!amt) continue;
+    const co = lineCompany(r, idx, defaultCo);
+    const key = normalizeVendor(vendor);
+    if (key === normalizeVendor(co)) continue;                          // the company itself
+    const acct = txt(r, idx.account), an = txt(r, idx.accountName);
+    const kind = acctKind(acct);
+    const w = (W[co] ??= {})[key] ??= { n: vendor, k: key, bank: 0, cardBP: 0, bill: {}, billLbl: {}, dir: {}, dirLbl: {}, x: 0 };
+    if (/bill payment/i.test(type)) {
+      if (kind === 'bank') w.bank += -amt; else if (kind === 'card') w.cardBP += Math.abs(amt);
+      continue;
+    }
+    if (kind !== 'other') continue;                                     // bank / card / A-P side of the entry
+    const cat = map[co + '|' + acct + '|' + an] || '';
+    const label = (acct + (an ? ' ' + an : '')).trim() || '(no account)';
+    if (/^bill$|vendor credit/i.test(type)) { w.bill[cat] = (w.bill[cat] || 0) + amt; (w.billLbl[cat] ??= new Set()).add(label); continue; }
+    if (acctKind(txt(r, idx.split)) === 'card') { w.x += amt; continue; }   // paid on a credit card
+    if (/deposit/i.test(type) && (amt > 0 || !cat)) continue;              // money in; only vendor refunds on mapped accounts count
+    w.dir[cat] = (w.dir[cat] || 0) + amt; (w.dirLbl[cat] ??= new Set()).add(label);
+  }
+  const cos = {};
+  for (const co in W) for (const key in W[co]) {
+    const w = W[co][key];
+    const v = { n: w.n, k: w.k, t: 0, x: Math.max(0, w.x + w.cardBP), c: {}, u: 0, ua: [], nr: [], up: 0, cash: 1 };
+    const add = (cat, amt, labels) => {
+      if (!amt) return;
+      if (!cat) { v.u += amt; labels.forEach(l => { if (!v.ua.includes(l)) v.ua.push(l); }); return; }
+      if (cat === 'Not Reportable') labels.forEach(l => { if (!v.nr.includes(l)) v.nr.push(l); });
+      v.c[cat] = (v.c[cat] || 0) + amt;
+    };
+    for (const cat in w.dir) add(cat, w.dir[cat], [...w.dirLbl[cat]]);
+    // bank bill payments, spread over what the vendor's bills were for
+    const billTot = Object.values(w.bill).filter(x => x > 0).reduce((a, b) => a + b, 0);
+    if (w.bank > 0.005) {
+      if (billTot > 0.005) {
+        // payments on bills dated before this file are assumed to be for the same kind of work
+        for (const cat in w.bill) if (w.bill[cat] > 0) add(cat, w.bank * w.bill[cat] / billTot, [...w.billLbl[cat]]);
+        v.up = Math.max(0, billTot - w.cardBP - w.bank);
+      } else {
+        const dirTot = Object.values(w.dir).reduce((a, b) => a + Math.abs(b), 0);
+        if (dirTot > 0.005) { for (const cat in w.dir) add(cat, w.bank * Math.abs(w.dir[cat]) / dirTot, [...w.dirLbl[cat]]); }
+        else add('', w.bank, ['bills dated before this ledger — check what they were for']);
+      }
+    } else if (billTot > 0.005) v.up = Math.max(0, billTot - w.cardBP);
+    for (const cat in v.c) { v.c[cat] = Math.max(0, v.c[cat]); if (!v.c[cat]) delete v.c[cat]; }
+    v.u = Math.max(0, v.u);
+    v.t = Object.values(v.c).reduce((a, b) => a + b, 0) + v.u + v.x;
+    if (v.t < 0.005 && v.up < 0.005) continue;                          // nothing paid, nothing owed
+    (cos[co] ??= {})[key] = v;
+  }
+  return { cos, skipped, cash: true };
+}
+
 /** 1099 decision + plain-English reason. v.e = entity type from the W-9. */
 export function evaluate(v, rules) {
   const e = v.e || 'Unknown';
-  const unknown = /unknown/i.test(e), corp = /corporation|c corp|s corp/i.test(e), exempt = /exempt|government/i.test(e);
-  const card = v.x > 0 ? ` ${money(v.x)} paid by card/PayPal excluded (the processor reports it on 1099-K).` : '';
+  const unknown = /unknown/i.test(e), exempt = /exempt|government/i.test(e);
+  const rsG = v.rs && v.rs.c !== 'low' ? ({ us_corporation: 'corp', foreign: 'foreign', government: 'gov', nonprofit: 'gov' })[v.rs.k] || '' : '';
+  const guess = unknown ? (guessEntity(v.n) || rsG) : '';
+  const byWeb = unknown && !guessEntity(v.n) && !!rsG;
+  const corp = /corporation|c corp|s corp/i.test(e) || guess === 'corp';
+  const how = v.cash ? 'paid from the bank' : 'paid by check/ACH/wire';
+  const card = v.x > 0 ? ` ${money(v.x)} paid by card excluded (reported on 1099-K).` : '';
+  const unpaid = v.up > 0.5 ? ` ${money(v.up)} billed but not yet paid is not counted.` : '';
   const unm = v.u > 0 ? ` ${money(v.u)} in unmapped accounts (${v.ua.join(', ')}) not counted yet.` : '';
   if (/foreign/i.test(e)) return { s: S.NOT, fb: '', rep: 0, why: 'Foreign vendor with W-8 on file — no 1099; review for Form 1042-S.' };
   const q = [], below = [], corpOut = []; let rep = 0;
@@ -222,22 +355,39 @@ export function evaluate(v, rules) {
     const it = { cat, amt, r };
     if (amt >= r.th) (corp && r.corp ? corpOut : q).push(it); else below.push(it);
   }
-  const d = it => `${it.cat} ${money(it.amt)} ≥ ${money(it.r.th)} threshold (${it.r.form} box ${it.r.box})`;
+  const d = it => `${it.cat} ${money(it.amt)} ≥ ${money(it.r.th)} (${it.r.form} box ${it.r.box})`;
+  const corpWhy = guess === 'corp' ? (byWeb ? 'online research shows a corporation (confirm with W-9 if in doubt)' : 'the name shows a corporation (Inc./Corp. — IRS name rule)') : `the W-9 shows ${e}`;
   if (q.length) {
     const fb = [...new Set(q.map(x => x.r.form + ' ' + x.r.box))].join('; ');
     const det = q.map(d).join('; ');
-    if (exempt) return { s: S.NOT, fb: '', rep, why: `${det}, but the W-9 shows an exempt payee.${card}` };
-    if (unknown) return { s: S.W9, fb, rep, why: `${det} paid by check/ACH/wire. Entity type unknown — get the W-9 to confirm (corporations are exempt for services and rent).${card}${unm}` };
-    return { s: S.ELIG, fb, rep, why: `${det} paid by check/ACH/wire; W-9 entity: ${e}.${card}${unm}` };
+    if (exempt || guess === 'gov') return { s: S.NOT, fb: '', rep, why: `${det}, but ${exempt ? 'the W-9 shows an exempt payee' : 'this looks like a government, public or tax-exempt body (exempt)'}.${card}` };
+    if (unknown) {
+      const hint = guess === 'corp' ? ' Corporation by name, but attorneys and medical providers are reported even when incorporated — get the W-9.'
+        : guess === 'foreign' ? ' Looks like a foreign company — ask for Form W-8BEN-E instead of a W-9 (no 1099 if foreign).'
+        : ' Entity type unknown — get the W-9 (corporations are exempt for services and rent).';
+      return { s: S.W9, fb, rep, why: `${det} ${how}.${hint}${card}${unpaid}${unm}`, guess };
+    }
+    return { s: S.ELIG, fb, rep, why: `${det} ${how}; W-9 entity: ${e}.${card}${unpaid}${unm}` };
   }
-  if (v.u > 0) return { s: S.REV, fb: '', rep, why: `${money(v.u)} paid through unmapped GL accounts (${v.ua.join(', ')}). Map them and re-import.${card}` };
-  if (corpOut.length) return { s: S.NOT, fb: '', rep, why: `${corpOut.map(d).join('; ')}, but the W-9 shows ${e} — corporations are exempt for these payments.${card}` };
+  const minTh = (rules.Services || {}).th || Math.min(...Object.values(rules).filter(r => r.th > 10).map(r => r.th));
+  if (guess === 'gov' && !below.length && !corpOut.length) return { s: S.NOT, fb: '', rep, why: `Government, public or tax-exempt body — exempt from 1099 reporting.${card}` };
+  const biggest = below.reduce((m, b) => Math.max(m, b.amt), 0);
+  if (v.u > 0 && v.u + biggest >= minTh && !corpOut.length) return { s: S.REV, fb: '', rep, why: `${money(v.u)} ${how} through GL accounts with no 1099 category (${v.ua.join(', ')}). Set the category and re-import.${card}` };
+  if (corpOut.length) return { s: S.NOT, fb: '', rep, why: `${corpOut.map(d).join('; ')}, but ${corpWhy} — corporations are exempt for these payments.${card}` };
   if (below.length) {
     const near = below.filter(b => b.amt >= 0.9 * b.r.th);
-    return { s: S.NOT, fb: '', rep, why: `Below threshold: ${below.map(b => `${b.cat} ${money(b.amt)} < ${money(b.r.th)}`).join('; ')}.${near.length ? ' Within 10% of the threshold — check for missing payments.' : ''}${card}` };
+    return { s: S.NOT, fb: '', rep, why: `Below threshold: ${below.map(b => `${b.cat} ${money(b.amt)} < ${money(b.r.th)}`).join('; ')}.${near.length ? ' Within 10% of the threshold — check for missing payments.' : ''}${card}${unpaid}` };
   }
-  if (v.x > 0 && !Object.keys(v.c).length) return { s: S.NOT, fb: '', rep: 0, why: `All ${money(v.x)} paid by card/PayPal — the processor reports it on 1099-K, not you.` };
-  return { s: S.NOT, fb: '', rep: 0, why: `Payments are for non-reportable items (${v.nr.join(', ') || 'no reportable accounts'}).${card}` };
+  if (v.u > 0) return { s: S.NOT, fb: '', rep, why: `Only ${money(v.u)} ${how} in uncategorised accounts — below the threshold either way.${card}` };
+  if (v.t < 0.005 && v.up > 0) return { s: S.NOT, fb: '', rep: 0, why: `Nothing paid yet this year — ${money(v.up)} billed but unpaid.` };
+  if (v.x > 0 && !Object.keys(v.c).length) return { s: S.NOT, fb: '', rep: 0, why: `All ${money(v.x)} paid by card — the processor reports it on 1099-K, not you.` };
+  return { s: S.NOT, fb: '', rep: 0, why: `Payments are for non-reportable items (${v.nr.slice(0, 4).join(', ') || 'no reportable accounts'}).${card}` };
+}
+
+/** True when a vendor is worth listing at all: something paid in a 1099-type category, or needs review. */
+export function isRelevant(v, ev) {
+  if (ev.s !== S.NOT) return true;
+  return Object.keys(v.c || {}).some(c => c !== 'Not Reportable' && v.c[c] > 0);
 }
 
 /** W-9 tracking state: rec = received, trk = requested via email tracker, req = to request, na = not needed */
