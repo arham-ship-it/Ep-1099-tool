@@ -299,7 +299,7 @@ function bindMain(c, vs, paidCount) {
 
 function emptyHtml() {
   return `<section class="card empty"><h1 style="font-size:26px">Find your 1099 vendors in minutes</h1>
-    <p class="note" style="max-width:520px;margin:12px auto 24px">Upload a general ledger or AP payment export (.xlsx or .csv). The tool totals payments per vendor, applies the IRS ${latestYear()} rules (${money(RULES[latestYear()]['Nonemployee compensation'].th)} for 1099-NEC and most 1099-MISC), and builds one color-coded tracker for each company in the file.</p>
+    <p class="note" style="max-width:520px;margin:12px auto 24px">Upload a general ledger or AP payment export (.xlsx or .csv). The tool totals payments per vendor, applies the IRS ${latestYear()} rules (${money(RULES[latestYear()]['Services'].th)} for 1099-NEC and most 1099-MISC), and builds one color-coded tracker for each company in the file.</p>
     <div class="dropzone" id="emptyDrop" tabindex="0" role="button" aria-label="Drop general ledger file here">Drop a GL file here, or click to choose</div>
     <div style="margin-top:20px"><button class="ghost" id="trySample" type="button">Try it with a sample GL</button></div>
     <p class="note" style="margin-top:28px">Next: read W-9s from the client’s Drive folder (or upload them), then send vendors that still need a W-9 to your Google Sheet email tracker.</p></section>`;
@@ -432,13 +432,14 @@ async function processW9s(files) {
 }
 async function readFromDrive(c) {
   const s = Store.settings();
+  const clientId = s.googleClientId || import.meta.env.VITE_GOOGLE_CLIENT_ID;
   try {
     toast('Signing in to Google…');
-    const files = await listDriveFiles(c.driveUrl, s.googleClientId);
+    const files = await listDriveFiles(c.driveUrl, clientId);
     if (!files.length) return toast('No PDF or image files in that folder.');
     toast(`Downloading ${files.length} files…`);
     const out = [];
-    for (const f of files) out.push(await downloadDriveFile(f, s.googleClientId));
+    for (const f of files) out.push(await downloadDriveFile(f, clientId));
     processW9s(out);
   } catch (e) { toast(e.message); }
 }
@@ -446,6 +447,7 @@ async function readFromDrive(c) {
 function getW9sFromDrive(c, vs) {
   if (!c.driveUrl) return toast('Paste the client’s W-9 Drive folder link on this tracker first.');
   const s = Store.settings();
+  if (s.googleClientId || import.meta.env.VITE_GOOGLE_CLIENT_ID) return readFromDrive(c);
   const names = vs.filter(v => (v.ev.s === S.ELIG || v.ev.s === S.W9) && v.w !== 'rec').map(v => v.n);
   const viaSheet = s.sheetUrl ? driveCheckLink(s, c.name, c.driveUrl, names, location.origin + location.pathname) : '';
   const md = modal(`<div class="phead"><h2>Get W-9s from Drive</h2><button class="ghost" id="dClose" type="button">Close</button></div>
