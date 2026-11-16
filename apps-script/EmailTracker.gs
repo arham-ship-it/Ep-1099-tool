@@ -1,5 +1,5 @@
 /******************************************************************************
- * EP 1099 — EMAIL TRACKER (Google Sheets + Apps Script)  v4.0 (timeline + management dashboard), Nov 2026
+ * EP 1099 — EMAIL TRACKER (Google Sheets + Apps Script)  v4.1 (timeline + management dashboard), Nov 2026
  *
  * The EP 1099 Tool web app finds the 1099 vendors and sends them here.
  * This Sheet is the team's working tracker:
@@ -29,7 +29,7 @@ const C = {
   green: '#dcf4e8', greenInk: '#11845b', orange: '#ffe3d1', orangeInk: '#b3470e', grey: '#eceff3', greyInk: '#5f6b80'
 };
 const FONT = 'Poppins';
-const VERSION = 'v4.0';
+const VERSION = 'v4.1';
 // Timeline: key, Settings row name, default date. Dates falling on a weekend/holiday move to the next working day.
 const TL = [
   ['start', 'Timeline: Project start', '2026-11-17'],
@@ -692,25 +692,37 @@ function fileNorm_(name) {
 }
 function driveFiles_(folderUrl) {
   const out = [];
-  const walk = function (folder, depth) {
+  // Each file is matched on its own name AND the names of the folders it sits in,
+  // so "Gish PLLC / W9.pdf" and "W-9s / 2026 / Gish PLLC W-9.pdf" both work.
+  const walk = function (folder, path, depth) {
     const it = folder.getFiles();
-    while (it.hasNext() && out.length < 3000) { const f = it.next(); out.push({ name: f.getName(), url: f.getUrl(), norm: fileNorm_(f.getName()) }); }
-    if (depth >= 4) return;
-    const sub = folder.getFolders(); while (sub.hasNext()) walk(sub.next(), depth + 1);
+    while (it.hasNext() && out.length < 5000) {
+      const f = it.next(); const nm = f.getName();
+      if (!/\.(pdf|png|jpe?g|tiff?|heic|docx?)$/i.test(nm) && !/pdf|image/i.test(f.getMimeType())) continue;
+      out.push({ name: (path.length ? path.join(' / ') + ' / ' : '') + nm, url: f.getUrl(), norm: fileNorm_(nm), pnorm: path.map(fileNorm_), isW9: /w-?\s?9/i.test(nm) || path.some(function (p) { return /w-?\s?9/i.test(p); }) });
+    }
+    if (depth >= 5) return;
+    const sub = folder.getFolders(); while (sub.hasNext()) { const d = sub.next(); walk(d, path.concat(d.getName()), depth + 1); }
   };
-  walk(DriveApp.getFolderById(folderId_(folderUrl)), 0);
+  walk(DriveApp.getFolderById(folderId_(folderUrl)), [], 0);
   return out;
 }
-/** Best W-9 file for a vendor name: whole name inside the file name, or (2+ words) every word present. */
+function nameIn_(key, words, norm) {
+  if (norm.indexOf(' ' + key + ' ') >= 0) return true;
+  return words.length >= 2 && words.every(function (w) { return norm.indexOf(' ' + w + ' ') >= 0; });
+}
+/** Best W-9 file for a vendor: vendor name in the file name, or in one of its folder names. W-9-named files win. */
 function findW9_(vendor, files) {
   const key = normV_(vendor); if (key.length < 3) return null;
   const words = key.split(' ').filter(function (w) { return w.length > 1; });
-  let best = null;
+  let best = null, score = 0;
   files.forEach(function (f) {
-    if (best && /w-?\s?9/i.test(best.name)) return;
-    const whole = f.norm.indexOf(' ' + key + ' ') >= 0;
-    const all = words.length >= 2 && words.every(function (w) { return f.norm.indexOf(' ' + w + ' ') >= 0; });
-    if (whole || all) best = f;
+    let sc = 0;
+    if (nameIn_(key, words, f.norm)) sc = 3;
+    else if (f.pnorm.some(function (p) { return nameIn_(key, words, p); })) sc = 2;
+    if (!sc) return;
+    if (f.isW9) sc += 2;
+    if (sc > score) { best = f; score = sc; }
   });
   return best;
 }
@@ -742,7 +754,7 @@ function checkDriveThisTab() {
   let found;
   try { found = checkDriveTab_(sh, ss); } catch (e) { ui.alert('Couldn’t open that Drive folder.\n\nMake sure it is shared with ' + Session.getActiveUser().getEmail() + ' and the link is a folder link.\n\n(' + e.message + ')'); return; }
   refreshSummary_(ss);
-  ui.alert(found + ' new W-9' + (found === 1 ? '' : 's') + ' found in Drive ✓\n\nMatched vendors are marked “Yes (Drive)” with the file link in Notes, and will not be emailed.\nFiles are matched by name — name them like “Vendor Name W-9.pdf”.');
+  ui.alert(found + ' new W-9' + (found === 1 ? '' : 's') + ' found in Drive ✓\n\nMatched vendors are marked “Yes (Drive)” with the file link in Notes, and will not be emailed.\nFiles are matched by file name or folder name (e.g. “Vendor Name W-9.pdf” or “Vendor Name / W9.pdf”).');
 }
 function checkDriveAll_(ss) {
   let total = 0; const cache = {};
@@ -778,8 +790,8 @@ function w9Page_(p) {
   return HtmlService.createHtmlOutput(
     '<div style="font-family:system-ui,sans-serif;max-width:680px;margin:40px auto;padding:24px;border:1px solid #d5e6e1;border-radius:12px">' +
     '<div style="font-weight:700;font-size:20px;color:#11845b">' + hits.length + ' of ' + names.length + ' vendors have a W-9 in Drive</div>' +
-    '<p style="color:#55627d">' + files.length + ' files checked in the folder (subfolders included). Files are matched by name.</p>' +
-    (rows ? '<table style="font-size:13px;border-collapse:collapse">' + rows + '</table>' : '<p>No matching file names. Name files like “Vendor Name W-9.pdf”.</p>') +
+    '<p style="color:#55627d">' + files.length + ' files checked in the folder and its sub folders. Matched on file and folder names.</p>' +
+    (rows ? '<table style="font-size:13px;border-collapse:collapse">' + rows + '</table>' : '<p>No matches. Put each W-9 in a folder named after the vendor, or name the file like “Vendor Name W-9.pdf”.</p>') +
     (back && hits.length ? '<p style="margin-top:20px"><a target="_top" style="background:#00c49a;color:#1c2a4d;font-weight:700;padding:10px 16px;border-radius:8px;text-decoration:none" href="' + back + '#w9=' + payload + '">Save these W-9s in the EP 1099 Tool</a></p>' : '') +
     '</div>').setTitle('EP 1099 – W-9s in Drive');
 }
