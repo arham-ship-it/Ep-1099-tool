@@ -185,7 +185,7 @@ function renderMain() {
   <section class="card"><div class="chead">
     <div style="min-width:0"><h1>${esc(c.name)}</h1>
       <div class="meta"><span>Tax year <b>${c.taxYear}</b></span><span>${c.glFile ? 'GL: ' + esc(c.glFile) + ' · imported ' + esc(fmtDate(c.importedAt)) : ''}</span>
-        ${c.driveUrl ? `<a href="${esc(c.driveUrl)}" target="_blank" rel="noopener">Open client W-9 folder</a>` : ''}</div>
+        ${c.driveUrl ? `<a href="${esc(c.driveUrl)}" target="_blank" rel="noopener">View folder in Drive</a>` : ''}</div>
       <div class="meta internal">
         <label>Assigned to
           <select id="cAssigned">
@@ -448,8 +448,12 @@ function getW9sFromDrive(c, vs) {
   if (!c.driveUrl) return toast('Paste the client’s W-9 Drive folder link on this tracker first.');
   const s = Store.settings();
   if (s.googleClientId || import.meta.env.VITE_GOOGLE_CLIENT_ID) return readFromDrive(c);
+  if (!s.sheetUrl) return toast('Connect the Google Sheet email tracker in Settings first.');
   const names = vs.filter(v => (v.ev.s === S.ELIG || v.ev.s === S.W9) && v.w !== 'rec').map(v => v.n);
-  const viaSheet = s.sheetUrl ? driveCheckLink(s, c.name, c.driveUrl, names, location.origin + location.pathname) : '';
+  const viaSheet = driveCheckLink(s, c.name, c.driveUrl, names, location.origin + location.pathname);
+  if (window.open(viaSheet, '_blank')) {
+    return toast("Checking the Drive folder in a new tab — click 'Save these W-9s in the EP 1099 Tool' there.");
+  }
   const md = modal(`<div class="phead"><h2>Get W-9s from Drive</h2><button class="ghost" id="dClose" type="button">Close</button></div>
     <p class="note">Looks in <a href="${esc(c.driveUrl)}" target="_blank" rel="noopener">the client’s W-9 folder</a> (subfolders included) for a file named after each of the ${names.length} vendors that still need a W-9.</p>
     <div class="actions">
