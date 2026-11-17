@@ -430,29 +430,39 @@ async function processW9s(files) {
     it.st = 'Ready'; renderW9();
   }
 }
-async function readFromDrive(c) {
+function settingsFor(c) {
   const s = Store.settings();
+  const activeClient = c || (state.cid && Store.clients()[state.cid]) || null;
+  return {
+    ...s,
+    workspaceDomain: s.workspaceDomain || 'enduringplanet.com',
+    workEmail: s.workEmail || (activeClient && activeClient.senderEmail) || Store.currentUser()?.email || ''
+  };
+}
+async function readFromDrive(c) {
+  const s = settingsFor(c);
   const clientId = s.googleClientId || import.meta.env.VITE_GOOGLE_CLIENT_ID;
+  const opts = { hd: s.workspaceDomain, hint: s.workEmail };
   try {
     toast('Signing in to Google…');
-    const files = await listDriveFiles(c.driveUrl, clientId);
+    const files = await listDriveFiles(c.driveUrl, clientId, opts);
     if (!files.length) return toast('No PDF or image files in that folder.');
     toast(`Downloading ${files.length} files…`);
     const out = [];
-    for (const f of files) out.push(await downloadDriveFile(f, clientId));
+    for (const f of files) out.push(await downloadDriveFile(f, clientId, opts));
     processW9s(out);
   } catch (e) { toast(e.message); }
 }
-/** "Get W-9s from Drive": through the Sheet (no setup) by default; through Google sign-in when a Client ID is set (also reads the forms). */
+/** "Get W-9s from Drive": through Google sign-in when a Client ID is set (direct, in-app); falls back to the Sheet link otherwise. */
 function getW9sFromDrive(c, vs) {
   if (!c.driveUrl) return toast('Paste the client’s W-9 Drive folder link on this tracker first.');
-  const s = Store.settings();
+  const s = settingsFor(c);
   if (s.googleClientId || import.meta.env.VITE_GOOGLE_CLIENT_ID) return readFromDrive(c);
   if (!s.sheetUrl) return toast('Connect the Google Sheet email tracker in Settings first.');
   const names = vs.filter(v => (v.ev.s === S.ELIG || v.ev.s === S.W9) && v.w !== 'rec').map(v => v.n);
   const viaSheet = driveCheckLink(s, c.name, c.driveUrl, names, location.origin + location.pathname);
   if (window.open(viaSheet, '_blank')) {
-    return toast("Checking the Drive folder in a new tab — click 'Save these W-9s in the EP 1099 Tool' there.");
+    return toast("If Google says 'unable to open the file', open the app in a Chrome profile signed in only to your work account.");
   }
   const md = modal(`<div class="phead"><h2>Get W-9s from Drive</h2><button class="ghost" id="dClose" type="button">Close</button></div>
     <p class="note">Looks in <a href="${esc(c.driveUrl)}" target="_blank" rel="noopener">the client’s W-9 folder</a> (subfolders included) for a file named after each of the ${names.length} vendors that still need a W-9.</p>
@@ -532,7 +542,7 @@ function openSend(c, vs, paidCount) {
   const rows = vs.filter(v => v.ev.s === S.ELIG || v.ev.s === S.W9);
   const toAsk = rows.filter(v => v.w !== 'rec');
   const meta = { paid: paidCount || vs.length, folder: c.driveUrl || '' };
-  const s = Store.settings();
+  const s = settingsFor(c);
   const payload = rows.map(v => [v.n, v.cn || '', v.ce || '', r2(v.ev.rep), v.ev.fb, v.ev.s, v.w === 'rec' ? 1 : 0]);
   const sender = [c.senderName || '', c.senderEmail || ''];
   const missing = toAsk.filter(v => !v.ce).length;
@@ -574,7 +584,9 @@ function openSend(c, vs, paidCount) {
 
 /* ------------------------------ settings ------------------------------ */
 $('btnSettings').onclick = () => {
-  const s = Store.settings();
+  const s = settingsFor();
+  const authSuffix = s.workEmail ? '&authuser=' + encodeURIComponent(s.workEmail) : '';
+  const testLink = s.sheetUrl ? s.sheetUrl.split('?')[0] + '?k=' + encodeURIComponent(s.sheetKey || '') + authSuffix : '';
   const md = modal(`<div class="phead"><h2>Settings</h2><button class="ghost" id="eClose" type="button">Close</button></div>
     <div style="background:var(--brand-tint);border:1px solid rgba(1,213,164,0.3);padding:10px 12px;border-radius:8px;margin-bottom:14px;font-size:12.5px;color:var(--brand-ink)">
       <b>Team-wide settings:</b> Synced to Firebase Firestore (<code>settings/main</code>) for all team members.
@@ -582,13 +594,15 @@ $('btnSettings').onclick = () => {
     <h3 style="font-size:15px">Google Sheet email tracker</h3>
     <div class="grid2"><label class="field">Web app URL<input id="eUrl" value="${esc(s.sheetUrl || '')}" placeholder="https://script.google.com/macros/s/…/exec"></label>
     <label class="field">App key (Sheet → Settings tab)<input id="eKey" value="${esc(s.sheetKey || '')}"></label></div>
-    ${s.sheetUrl ? `<p class="note"><a href="${esc(s.sheetUrl.split('?')[0] + '?k=' + encodeURIComponent(s.sheetKey || ''))}" target="_blank" rel="noopener">Test the connection</a> — should say “Connected”.</p>` : ''}
+    ${testLink ? `<p class="note"><a href="${esc(testLink)}" target="_blank" rel="noopener">Test the connection</a> — should say “Connected”.</p>` : ''}
     <h3 style="font-size:15px">Google Drive (read W-9 folders)</h3>
-    <div class="grid2"><label class="field">Google OAuth Client ID<input id="eCid" value="${esc(s.googleClientId || '')}" placeholder="…apps.googleusercontent.com"></label></div>
+    <div class="grid2"><label class="field">Google OAuth Client ID<input id="eCid" value="${esc(s.googleClientId || '')}" placeholder="…apps.googleusercontent.com"></label>
+    <label class="field">Google Workspace domain<input id="eDomain" value="${esc(s.workspaceDomain || 'enduringplanet.com')}" placeholder="enduringplanet.com"></label></div>
 
     <div style="background:var(--surface-2);border:1px solid var(--line);padding:10px 12px;border-radius:8px;margin:16px 0 10px;font-size:12.5px;color:var(--ink-2)">
       <b>Personal settings:</b> Saved only in this browser (not shared across the team).
     </div>
+    <div class="grid2"><label class="field">My work Google email<input id="eWorkEmail" value="${esc(s.workEmail || '')}" placeholder="name@enduringplanet.com"></label></div>
     <h3 style="font-size:15px">Optional: AI reading of scanned W-9s (Gemini)</h3>
     <div class="grid2"><label class="field">Gemini API key<input id="eGk" type="password" value="${esc(s.geminiKey || '')}" placeholder="Leave blank to skip"></label>
     <label class="field">Gemini model<input id="eGm" value="${esc(s.geminiModel || 'gemini-2.5-flash')}"></label></div>
@@ -598,8 +612,15 @@ $('btnSettings').onclick = () => {
   md.querySelector('#eSave').onclick = () => {
     const u = md.querySelector('#eUrl').value.trim();
     if (u && !/^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s\/[^/]+\/exec/.test(u)) return toast('The web app URL should end in /exec.');
-    Store.putSettings({ sheetUrl: u, sheetKey: md.querySelector('#eKey').value.trim(), googleClientId: md.querySelector('#eCid').value.trim(),
-      geminiKey: md.querySelector('#eGk').value.trim(), geminiModel: md.querySelector('#eGm').value.trim() });
+    Store.putSettings({
+      sheetUrl: u,
+      sheetKey: md.querySelector('#eKey').value.trim(),
+      googleClientId: md.querySelector('#eCid').value.trim(),
+      workspaceDomain: md.querySelector('#eDomain').value.trim() || 'enduringplanet.com',
+      workEmail: md.querySelector('#eWorkEmail').value.trim(),
+      geminiKey: md.querySelector('#eGk').value.trim(),
+      geminiModel: md.querySelector('#eGm').value.trim()
+    });
     closeModal(); toast('Settings saved');
   };
 };

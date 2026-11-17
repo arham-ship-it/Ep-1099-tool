@@ -190,10 +190,13 @@ export const Store = {
 
   settings() {
     const personal = loadPersonalSettings();
-    return {
+    const merged = {
+      workspaceDomain: 'enduringplanet.com',
       ...(data.settings || {}),
       ...personal
     };
+    if (!merged.workspaceDomain) merged.workspaceDomain = 'enduringplanet.com';
+    return merged;
   },
 
   async putClient(cid, patch) {
@@ -247,9 +250,13 @@ export const Store = {
   },
 
   async putSettings(patch) {
-    const { geminiKey, geminiModel, ...teamSettings } = patch;
-    if (geminiKey !== undefined || geminiModel !== undefined) {
-      savePersonalSettings({ geminiKey, geminiModel });
+    const { geminiKey, geminiModel, workEmail, ...teamSettings } = patch;
+    const personalPatch = {};
+    if (geminiKey !== undefined) personalPatch.geminiKey = geminiKey;
+    if (geminiModel !== undefined) personalPatch.geminiModel = geminiModel;
+    if (workEmail !== undefined) personalPatch.workEmail = workEmail;
+    if (Object.keys(personalPatch).length) {
+      savePersonalSettings(personalPatch);
     }
 
     if (Object.keys(teamSettings).length) {

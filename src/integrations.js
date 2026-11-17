@@ -7,39 +7,59 @@ import { ENTITIES, parseW9Fields, parseW9Text } from './logic.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
 /* ---------------------------- Google Drive ---------------------------- */
-let token = null, tokenExp = 0;
+let token = null, tokenExp = 0, promptedOnce = false;
 
 /** Ask the user to sign in with Google (read-only Drive). Needs an OAuth Client ID in Settings. */
-export function driveToken(clientId) {
+export function driveToken(clientId, opts = {}) {
   return new Promise((resolve, reject) => {
     if (token && Date.now() < tokenExp) return resolve(token);
     if (!window.google?.accounts?.oauth2) return reject(new Error('Google sign-in did not load. Check your connection.'));
     if (!clientId) return reject(new Error('Add your Google OAuth Client ID in Settings first.'));
+    const hd = opts.hd || opts.workspaceDomain || 'enduringplanet.com';
+    const hint = opts.hint || opts.workEmail || '';
     const tc = window.google.accounts.oauth2.initTokenClient({
       client_id: clientId,
       scope: 'https://www.googleapis.com/auth/drive.readonly',
+      ...(hd ? { hd } : {}),
+      ...(hint ? { hint } : {}),
       callback: r => {
         if (r.error) return reject(new Error(r.error_description || r.error));
         token = r.access_token; tokenExp = Date.now() + (Number(r.expires_in) - 60) * 1000; resolve(token);
       }
     });
-    tc.requestAccessToken();
+    const firstTime = !promptedOnce;
+    promptedOnce = true;
+    tc.requestAccessToken(firstTime ? { prompt: 'select_account' } : {});
   });
 }
 export function folderIdFromUrl(url) {
   const m = String(url).match(/folders\/([a-zA-Z0-9_-]+)/) || String(url).match(/[?&]id=([a-zA-Z0-9_-]+)/);
   return m ? m[1] : String(url).trim();
 }
+async function signedInDriveEmail(t, fallback) {
+  try {
+    const r = await fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)', { headers: { Authorization: 'Bearer ' + t } });
+    if (r.ok) { const j = await r.json(); if (j?.user?.emailAddress) return j.user.emailAddress; }
+  } catch {}
+  return fallback || 'your signed-in Google account';
+}
 /** List PDF/image files in a Drive folder (and one level of subfolders). Works with view-only shares. */
-export async function listDriveFiles(folderUrl, clientId) {
-  const t = await driveToken(clientId);
+export async function listDriveFiles(folderUrl, clientId, opts = {}) {
+  const t = await driveToken(clientId, opts);
   const list = async id => {
     const q = encodeURIComponent(`'${id}' in parents and trashed = false`);
     const out = []; let page = '';
     do {
       const r = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id,name,mimeType,modifiedTime)&pageSize=200&supportsAllDrives=true&includeItemsFromAllDrives=true${page ? '&pageToken=' + page : ''}`,
         { headers: { Authorization: 'Bearer ' + t } });
-      if (!r.ok) throw new Error(r.status === 404 ? 'Folder not found, or it isn’t shared with the Google account you signed in with.' : 'Drive error ' + r.status);
+      if (!r.ok) {
+        if (r.status === 403 || r.status === 404) {
+          const who = await signedInDriveEmail(t, opts.hint || opts.workEmail);
+          token = null; tokenExp = 0; promptedOnce = false;
+          throw new Error(`This folder isn't shared with ${who}. Share it with your work account or pick the right account and try again.`);
+        }
+        throw new Error('Drive error ' + r.status);
+      }
       const j = await r.json(); out.push(...j.files); page = j.nextPageToken || '';
     } while (page);
     return out;
@@ -51,8 +71,8 @@ export async function listDriveFiles(folderUrl, clientId) {
   }
   return files;
 }
-export async function downloadDriveFile(f, clientId) {
-  const t = await driveToken(clientId);
+export async function downloadDriveFile(f, clientId, opts = {}) {
+  const t = await driveToken(clientId, opts);
   const r = await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media&supportsAllDrives=true`, { headers: { Authorization: 'Bearer ' + t } });
   if (!r.ok) throw new Error('Couldn’t download ' + f.name + ' (' + r.status + ')');
   return new File([await r.blob()], f.name, { type: f.mimeType });
@@ -125,7 +145,9 @@ export function fromB64url(s) {
 /** Link(s) that add vendors to the Sheet (opens a confirmation page in a new tab). Split when long. */
 export function sheetLinks(settings, company, taxYear, sender, rows, meta) {
   const base = settings.sheetUrl.split('?')[0];
-  const make = rs => `${base}?k=${encodeURIComponent(settings.sheetKey || '')}&d=${encodeURIComponent(b64url(JSON.stringify({ c: company, y: taxYear, s: sender, r: rs, m: meta || {} })))}`;
+  const au = settings.workEmail || (sender && sender[1]) || '';
+  const auth = au ? `&authuser=${encodeURIComponent(au)}` : '';
+  const make = rs => `${base}?k=${encodeURIComponent(settings.sheetKey || '')}&d=${encodeURIComponent(b64url(JSON.stringify({ c: company, y: taxYear, s: sender, r: rs, m: meta || {} })))}${auth}`;
   const out = []; let cur = [];
   for (const row of rows) { cur.push(row); if (make(cur).length > 6500 && cur.length > 1) { cur.pop(); out.push({ url: make(cur), n: cur.length }); cur = [row]; } }
   if (cur.length) out.push({ url: make(cur), n: cur.length });
@@ -137,7 +159,9 @@ export function sheetLinks(settings, company, taxYear, sender, rows, meta) {
  */
 export function driveCheckLink(settings, company, folderUrl, vendorNames, returnUrl) {
   const base = settings.sheetUrl.split('?')[0];
-  return `${base}?k=${encodeURIComponent(settings.sheetKey || '')}&action=w9&c=${encodeURIComponent(company)}&f=${encodeURIComponent(folderUrl)}&r=${encodeURIComponent(returnUrl)}&d=${encodeURIComponent(b64url(JSON.stringify(vendorNames)))}`;
+  const au = settings.workEmail || '';
+  const auth = au ? `&authuser=${encodeURIComponent(au)}` : '';
+  return `${base}?k=${encodeURIComponent(settings.sheetKey || '')}&action=w9&c=${encodeURIComponent(company)}&f=${encodeURIComponent(folderUrl)}&r=${encodeURIComponent(returnUrl)}&d=${encodeURIComponent(b64url(JSON.stringify(vendorNames)))}${auth}`;
 }
 
 /* --------------------------- online vendor research --------------------------- */
