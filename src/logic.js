@@ -38,6 +38,7 @@ export function filingDue(taxYear) {
   while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
   return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 }
+const taxYearOf = rules => Object.keys(RULES).find(y => RULES[y] === rules) || '';
 export const latestYear = () => Math.max(...Object.keys(RULES).map(Number));
 export const rulesFor = y => RULES[y] || RULES[latestYear()];
 
@@ -92,7 +93,7 @@ export function suggestCategory(name) {
   if (/settlement/.test(n)) return '';
   if (/legal|attorney|law firm|lawyer|litigation|patent/.test(n)) return 'Legal Services';
   // payroll, benefits and wages are never 1099 (they go on W-2)
-  if (/salar|wage|payroll|benefit|401k|401\(k\)|pto|vacation|sick|bonus|workers comp|stock equity|equity comp/.test(n)) return 'Not Reportable';
+  if (/salar|wage|payroll|benefit|401k|401\(k\)|pto|vacation|sick|bonus|workers comp|stock equity|equity comp|\bpfl\b|\bsui\b|\bsuta\b|\bfuta\b|\bfica\b|medicare|social security|unemployment|withholding|employer tax/.test(n)) return 'Not Reportable';
   if (/contractor|subcontract|consult|freelanc|professional fee|accounting|bookkeep|taxation service|tax service|tax prep|audit/.test(n)) return 'Services';
   if (/install|repair|maintenance|testing|certification|engineering|recruit|staffing|affiliate|commission|referral|website|web dev|photograph|design|cleaning|janitor|landscap|security guard|it support|labor/.test(n)) return 'Services';
   if (/advertis/.test(n) && !/paid media/.test(n)) return 'Services';
@@ -119,6 +120,7 @@ export function acctKind(name) {
   if (/checking|savings|money market|\bbank\b|petty cash|^\d*\s*cash\b|treasury|vault|money out clearing|bill\.com.*clearing|operating account/.test(n)) return 'bank';
   return 'other';
 }
+export const PRIOR_BILLS = 'bills dated before this GL (not in the file)';
 const SKIP_TXN = /journal|transfer|^invoice$|^payment$|receive payment|sales receipt|credit memo|inventory|credit card payment|estimate|statement|purchase order/i;
 /** True when the file is a full double-entry ledger (has transaction type + split and bank-account lines). */
 export function isLedger(rows, idx) {
@@ -228,11 +230,16 @@ export function listAccounts(rows, idx, taxYear, defaultCo) {
   const ledger = isLedger(rows, idx);
   const m = {};
   for (const r of rows) {
-    if (!inYear(r, idx, taxYear)) continue;
     if (!txt(r, idx.vendor)) continue; // lines with no payee can't create a 1099
     const acct = txt(r, idx.account), an = txt(r, idx.accountName);
+    const type0 = txt(r, idx.txnType);
+    if (!inYear(r, idx, taxYear)) {
+      // in a full ledger, earlier-year bills are listed too: they say what this year's payments were for
+      const ly = idx.date !== undefined ? yearOf(r[idx.date]) : 0;
+      if (!(ledger && /^bill$|vendor credit/i.test(type0) && ly && ly < taxYear)) continue;
+    }
     if (ledger) {
-      const type = txt(r, idx.txnType);
+      const type = type0;
       if (SKIP_TXN.test(type) || /bill payment|deposit/i.test(type)) continue;
       if (acctKind(acct) !== 'other') continue;                         // bank, card and A/P sides
       if (!/^bill$|vendor credit/i.test(type) && acctKind(txt(r, idx.split)) === 'card') continue; // paid by card
@@ -283,14 +290,19 @@ function aggregateLedger(rows, idx, taxYear, defaultCo, map) {
     const vendor = txt(r, idx.vendor); if (!vendor) continue;
     const type = txt(r, idx.txnType);
     if (SKIP_TXN.test(type)) continue;
-    if (!inYear(r, idx, taxYear)) { skipped++; continue; }
+    const isBill = /^bill$|vendor credit/i.test(type);
+    const ly = idx.date !== undefined ? yearOf(r[idx.date]) : 0;
+    const thisYear = !ly || ly === taxYear;
+    // Bills from an earlier year are kept ONLY to learn what the vendor was paid for (a Dec 2025 bill paid
+    // in Jan 2026 counts in 2026). Bills from a later year and all other out-of-year lines are skipped.
+    if (!thisYear && !(isBill && ly < taxYear)) { skipped++; continue; }
     const amt = lineAmount(r, idx); if (!amt) continue;
     const co = lineCompany(r, idx, defaultCo);
     const key = normalizeVendor(vendor);
     if (key === normalizeVendor(co)) continue;                          // the company itself
     const acct = txt(r, idx.account), an = txt(r, idx.accountName);
     const kind = acctKind(acct);
-    const w = (W[co] ??= {})[key] ??= { n: vendor, k: key, bank: 0, cardBP: 0, bill: {}, billLbl: {}, dir: {}, dirLbl: {}, x: 0 };
+    const w = (W[co] ??= {})[key] ??= { n: vendor, k: key, bank: 0, cardBP: 0, bill: {}, billLbl: {}, billIn: 0, billPrior: 0, dir: {}, dirLbl: {}, x: 0 };
     if (/bill payment/i.test(type)) {
       if (kind === 'bank') w.bank += -amt; else if (kind === 'card') w.cardBP += Math.abs(amt);
       continue;
@@ -298,7 +310,11 @@ function aggregateLedger(rows, idx, taxYear, defaultCo, map) {
     if (kind !== 'other') continue;                                     // bank / card / A-P side of the entry
     const cat = map[co + '|' + acct + '|' + an] || '';
     const label = (acct + (an ? ' ' + an : '')).trim() || '(no account)';
-    if (/^bill$|vendor credit/i.test(type)) { w.bill[cat] = (w.bill[cat] || 0) + amt; (w.billLbl[cat] ??= new Set()).add(label); continue; }
+    if (isBill) {
+      w.bill[cat] = (w.bill[cat] || 0) + amt; (w.billLbl[cat] ??= new Set()).add(label);
+      if (thisYear) w.billIn += amt; else w.billPrior += amt;
+      continue;
+    }
     if (acctKind(txt(r, idx.split)) === 'card') { w.x += amt; continue; }   // paid on a credit card
     if (/deposit/i.test(type) && (amt > 0 || !cat)) continue;              // money in; only vendor refunds on mapped accounts count
     w.dir[cat] = (w.dir[cat] || 0) + amt; (w.dirLbl[cat] ??= new Set()).add(label);
@@ -306,7 +322,7 @@ function aggregateLedger(rows, idx, taxYear, defaultCo, map) {
   const cos = {};
   for (const co in W) for (const key in W[co]) {
     const w = W[co][key];
-    const v = { n: w.n, k: w.k, t: 0, x: Math.max(0, w.x + w.cardBP), c: {}, u: 0, ua: [], nr: [], up: 0, cash: 1 };
+    const v = { n: w.n, k: w.k, t: 0, x: Math.max(0, w.x + w.cardBP), c: {}, u: 0, ua: [], nr: [], up: 0, cash: 1, pb: 0 };
     const add = (cat, amt, labels) => {
       if (!amt) return;
       if (!cat) { v.u += amt; labels.forEach(l => { if (!v.ua.includes(l)) v.ua.push(l); }); return; }
@@ -320,17 +336,19 @@ function aggregateLedger(rows, idx, taxYear, defaultCo, map) {
       if (billTot > 0.005) {
         // payments on bills dated before this file are assumed to be for the same kind of work
         for (const cat in w.bill) if (w.bill[cat] > 0) add(cat, w.bank * w.bill[cat] / billTot, [...w.billLbl[cat]]);
-        v.up = Math.max(0, billTot - w.cardBP - w.bank);
+        // payments in the tax year settle the oldest (prior-year) bills first
+        v.pb = Math.min(w.bank, Math.max(0, w.billPrior));
+        v.up = Math.max(0, w.billIn - Math.max(0, w.bank + w.cardBP - Math.max(0, w.billPrior)));
       } else {
         const dirTot = Object.values(w.dir).reduce((a, b) => a + Math.abs(b), 0);
         if (dirTot > 0.005) { for (const cat in w.dir) add(cat, w.bank * Math.abs(w.dir[cat]) / dirTot, [...w.dirLbl[cat]]); }
-        else add('', w.bank, ['bills dated before this ledger — check what they were for']);
+        else { add('', w.bank, [PRIOR_BILLS]); v.pb = w.bank; }
       }
-    } else if (billTot > 0.005) v.up = Math.max(0, billTot - w.cardBP);
+    } else if (w.billIn > 0.005) v.up = Math.max(0, w.billIn - w.cardBP);
     for (const cat in v.c) { v.c[cat] = Math.max(0, v.c[cat]); if (!v.c[cat]) delete v.c[cat]; }
     v.u = Math.max(0, v.u);
     v.t = Object.values(v.c).reduce((a, b) => a + b, 0) + v.u + v.x;
-    if (v.t < 0.005 && v.up < 0.005) continue;                          // nothing paid, nothing owed
+    if (v.t < 0.005 && v.up < 0.005) continue;                          // nothing paid, nothing owed (incl. prior-year bills paid last year)
     (cos[co] ??= {})[key] = v;
   }
   return { cos, skipped, cash: true };
@@ -338,6 +356,11 @@ function aggregateLedger(rows, idx, taxYear, defaultCo, map) {
 
 /** 1099 decision + plain-English reason. v.e = entity type from the W-9. */
 export function evaluate(v, rules) {
+  // A category picked by hand for money the GL can't explain (e.g. a Dec bill paid in Jan) — v.oc
+  if (v.oc && v.u > 0) {
+    const c = { ...(v.c || {}) }; c[v.oc] = (c[v.oc] || 0) + v.u;
+    v = { ...v, c, u: 0, ua: [], nr: v.oc === 'Not Reportable' ? [...(v.nr || []), 'set by hand'] : v.nr };
+  }
   const e = v.e || 'Unknown';
   const unknown = /unknown/i.test(e), exempt = /exempt|government/i.test(e);
   const rsG = v.rs && v.rs.c !== 'low' ? ({ us_corporation: 'corp', foreign: 'foreign', government: 'gov', nonprofit: 'gov' })[v.rs.k] || '' : '';
@@ -347,7 +370,9 @@ export function evaluate(v, rules) {
   const how = v.cash ? 'paid from the bank' : 'paid by check/ACH/wire';
   const card = v.x > 0 ? ` ${money(v.x)} paid by card excluded (reported on 1099-K).` : '';
   const unpaid = v.up > 0.5 ? ` ${money(v.up)} billed but not yet paid is not counted.` : '';
-  const unm = v.u > 0 ? ` ${money(v.u)} in unmapped accounts (${v.ua.join(', ')}) not counted yet.` : '';
+  const prior = (v.ua || []).includes(PRIOR_BILLS);
+  const unm = v.u > 0 ? (prior ? ` ${money(v.u)} paid this year for bills dated before this GL — pick what it was for to include it.` : ` ${money(v.u)} in unmapped accounts (${v.ua.join(', ')}) not counted yet.`) : '';
+  const pbNote = v.pb > 0.5 && !prior ? ` Includes ${money(v.pb)} paid this year for bills from last year.` : '';
   if (/foreign/i.test(e)) return { s: S.NOT, fb: '', rep: 0, why: 'Foreign vendor with W-8 on file — no 1099; review for Form 1042-S.' };
   const q = [], below = [], corpOut = []; let rep = 0;
   for (const cat in v.c) {
@@ -365,28 +390,34 @@ export function evaluate(v, rules) {
       const hint = guess === 'corp' ? ' Corporation by name, but attorneys and medical providers are reported even when incorporated — get the W-9.'
         : guess === 'foreign' ? ' Looks like a foreign company — ask for Form W-8BEN-E instead of a W-9 (no 1099 if foreign).'
         : ' Entity type unknown — get the W-9 (corporations are exempt for services and rent).';
-      return { s: S.W9, fb, rep, why: `${det} ${how}.${hint}${card}${unpaid}${unm}`, guess };
+      return { s: S.W9, fb, rep, why: `${det} ${how}.${hint}${pbNote}${card}${unpaid}${unm}`, guess };
     }
-    return { s: S.ELIG, fb, rep, why: `${det} ${how}; W-9 entity: ${e}.${card}${unpaid}${unm}` };
+    return { s: S.ELIG, fb, rep, why: `${det} ${how}; W-9 entity: ${e}.${pbNote}${card}${unpaid}${unm}` };
   }
   const minTh = (rules.Services || {}).th || Math.min(...Object.values(rules).filter(r => r.th > 10).map(r => r.th));
   if (guess === 'gov' && !below.length && !corpOut.length) return { s: S.NOT, fb: '', rep, why: `Government, public or tax-exempt body — exempt from 1099 reporting.${card}` };
   const biggest = below.reduce((m, b) => Math.max(m, b.amt), 0);
-  if (v.u > 0 && v.u + biggest >= minTh && !corpOut.length) return { s: S.REV, fb: '', rep, why: `${money(v.u)} ${how} through GL accounts with no 1099 category (${v.ua.join(', ')}). Set the category and re-import.${card}` };
+  if (v.u > 0 && v.u + biggest >= minTh && !corpOut.length) return { s: S.REV, fb: '', rep: rep + v.u, why: prior
+      ? `${money(v.u)} ${how} in ${'' + taxYearOf(rules)} for bills dated before this GL (e.g. December bills paid in January), so the GL doesn’t say what they were for. Pick “Paid for” on this row, or upload a GL that starts a few months earlier.${card}`
+      : `${money(v.u)} ${how} through GL accounts with no 1099 category (${v.ua.join(', ')}). Set the category and re-import.${card}` };
   if (corpOut.length) return { s: S.NOT, fb: '', rep, why: `${corpOut.map(d).join('; ')}, but ${corpWhy} — corporations are exempt for these payments.${card}` };
   if (below.length) {
     const near = below.filter(b => b.amt >= 0.9 * b.r.th);
     return { s: S.NOT, fb: '', rep, why: `Below threshold: ${below.map(b => `${b.cat} ${money(b.amt)} < ${money(b.r.th)}`).join('; ')}.${near.length ? ' Within 10% of the threshold — check for missing payments.' : ''}${card}${unpaid}` };
   }
-  if (v.u > 0) return { s: S.NOT, fb: '', rep, why: `Only ${money(v.u)} ${how} in uncategorised accounts — below the threshold either way.${card}` };
+  if (v.u > 0) return { s: S.NOT, fb: '', rep: rep + v.u, why: prior
+      ? `${money(v.u)} ${how} for bills dated before this GL — below the ${money(minTh)} threshold whatever it was for.${card}`
+      : `Only ${money(v.u)} ${how} in uncategorised accounts — below the threshold either way.${card}` };
   if (v.t < 0.005 && v.up > 0) return { s: S.NOT, fb: '', rep: 0, why: `Nothing paid yet this year — ${money(v.up)} billed but unpaid.` };
   if (v.x > 0 && !Object.keys(v.c).length) return { s: S.NOT, fb: '', rep: 0, why: `All ${money(v.x)} paid by card — the processor reports it on 1099-K, not you.` };
   return { s: S.NOT, fb: '', rep: 0, why: `Payments are for non-reportable items (${v.nr.slice(0, 4).join(', ') || 'no reportable accounts'}).${card}` };
 }
 
-/** True when a vendor is worth listing at all: something paid in a 1099-type category, or needs review. */
+/** True when a vendor is worth listing: paid in a 1099-type category, paid for something the GL can't
+ *  explain (e.g. prior-year bills), or needs review. Payroll, card-only and goods-only vendors are left out. */
 export function isRelevant(v, ev) {
   if (ev.s !== S.NOT) return true;
+  if ((v.u || 0) > 0.5) return true;
   return Object.keys(v.c || {}).some(c => c !== 'Not Reportable' && v.c[c] > 0);
 }
 

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as XLSX from 'xlsx';
-import { mapHeaders, listAccounts, suggestCategory, aggregate, evaluate, rulesFor, S, parseW9Fields, matchByName, fieldKey } from '../src/logic.js';
+import { mapHeaders, listAccounts, suggestCategory, aggregate, evaluate, rulesFor, S, parseW9Fields, matchByName, fieldKey, isRelevant } from '../src/logic.js';
 
 const wb = XLSX.read(readFileSync(new URL('../sample/sample_GL_2026.csv', import.meta.url), 'utf8'), { type: 'string' });
 const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
@@ -149,4 +149,34 @@ test('cash basis: only bank payments count; unpaid bills, payroll journals and c
   assert.equal(guessEntity('E.G.O. North America, Inc.'), 'corp'); assert.equal(guessEntity('Copper Company'), '');
   assert.equal(evaluate(v['e g o north america'], R).s, S.NOT);                  // IRS name rule
   assert.equal(guessEntity('Shenzhen Ace Battery Co., Ltd'), 'foreign'); assert.equal(guessEntity('Oregon State University'), 'gov');
+});
+
+test('bills dated last year but paid this year count in this year (cash basis)', async () => {
+  const { prepareSheet } = await import('../src/logic.js');
+  const H = ['', 'Distribution account', 'Transaction date', 'Transaction type', 'Num', 'Name', 'Description', 'Split', 'Amount', 'Balance'];
+  const AP = '2100 Accounts Payable', BANK = '1103 CitiBank Checking-9813';
+  const L = (acct, date, type, name, split, amt) => ['', acct, date, type, '', name, '', split, amt, 0];
+  const R = rulesFor(2026);
+  const ledger = rows => { const p = prepareSheet([['PCT'], ['General Ledger'], ['2025-2026'], [], H, ...rows]); return { p, idx: mapHeaders(p.headers) }; };
+  const run = rows => { const { p, idx } = ledger(rows); const map = {};
+    listAccounts(p.rows, idx, 2026, 'PCT').forEach(a => { const c = suggestCategory(a.an || a.acct); if (c) map[a.co + '|' + a.acct + '|' + a.an] = c; });
+    return aggregate(p.rows, idx, 2026, 'PCT', map).cos['PCT']; };
+  const pay = (name, amt, d) => [L(BANK, d || '01/14/2026', 'Bill Payment (Check)', name, AP, -amt), L(AP, d || '01/14/2026', 'Bill Payment (Check)', name, BANK, -amt)];
+  const bill = (name, acct, amt, d) => [L(acct, d, 'Bill', name, AP, amt), L(AP, d, 'Bill', name, acct, amt)];
+  // A) GL starts Jan 2026: Dec bill is missing — paid amount is shown and flagged, never hidden
+  let v = run([...pay('NYMAN PAINTING LLC', 2735), ...pay('Small Painter', 900), L('6131 DC PFL', '01/15/2026', 'Expense', 'Jonathan Kalin', BANK, 300), L(BANK, '01/15/2026', 'Expense', 'Jonathan Kalin', '6131 DC PFL', -300)]);
+  let ev = evaluate(v['nyman painting'], R);
+  assert.equal(ev.s, S.REV); assert.equal(Math.round(ev.rep), 2735); assert.match(ev.why, /before this GL/);
+  const sp = evaluate(v['small painter'], R);
+  assert.equal(sp.s, S.NOT); assert.equal(isRelevant(v['small painter'], sp), true);  // listed as Not eligible
+  assert.equal(isRelevant(v['jonathan kalin'], evaluate(v['jonathan kalin'], R)), false); // payroll tax, not listed
+  // picking "Paid for" by hand classifies it
+  assert.equal(evaluate({ ...v['nyman painting'], oc: 'Services' }, R).s, S.W9);
+  // B) GL includes Dec 2025: the bill gives the category, the 2026 payment is counted
+  v = run([...bill('NYMAN PAINTING LLC', '6120 Repairs & Maintenance', 2735, '12/18/2025'), ...pay('NYMAN PAINTING LLC', 2735), ...pay('Filler A', 10), ...pay('Filler B', 10),
+           ...bill('Old Vendor', '6120 Repairs & Maintenance', 5000, '11/01/2025'), ...pay('Old Vendor', 5000, '11/20/2025')]);
+  ev = evaluate(v['nyman painting'], R);
+  assert.equal(ev.s, S.W9); assert.equal(Math.round(v['nyman painting'].c.Services), 2735); assert.equal(Math.round(v['nyman painting'].up), 0);
+  assert.match(ev.why, /bills from last year/);
+  assert.equal(v['old vendor'], undefined);   // billed and paid in 2025 — not a 2026 vendor
 });

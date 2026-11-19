@@ -242,7 +242,7 @@ function rowHtml(v) {
   return `<tr>
     <td><div class="vname">${esc(v.n)}</div>${v.w9 && v.w9.ln && v.w9.ln.toLowerCase() !== v.n.toLowerCase() ? `<div class="sub">W-9: ${esc(v.w9.ln)}</div>` : ''}${v.w9 && v.w9.l4 ? `<div class="sub">TIN •••${esc(v.w9.l4)}</div>` : ''}</td>
     <td class="amt num">${money(ev.rep)}${v.x ? `<div class="sub">${money(v.x)} card</div>` : ''}</td>
-    <td><span class="pill ${SCLASS[ev.s]}">${ev.s}</span></td>
+    <td><span class="pill ${SCLASS[ev.s]}">${ev.s}</span>${(v.u > 0 || v.oc) ? `<select class="internal" data-oc="${v.fk}" aria-label="What was this paid for" style="margin-top:6px"><option value="">Paid for?</option>${CATS.map(k => `<option ${v.oc === k ? 'selected' : ''}>${k}</option>`).join('')}</select>` : ''}</td>
     <td class="num">${esc(ev.fb) || '—'}</td>
     <td class="reason">${esc(ev.why)}${v.rs && v.rs.k !== 'unknown' ? `<div class="sub" style="margin-top:4px"><b>Online check:</b> ${esc(RS_LABEL[v.rs.k])} (${esc(v.rs.c)} confidence) — ${esc(v.rs.note)}</div>` : ''}</td>
     <td>${w}${toggle}</td>
@@ -256,6 +256,7 @@ function bindMain(c, vs, paidCount) {
   m.querySelectorAll('.chip').forEach(b => b.onclick = () => { state.filter = b.dataset.f; renderMain(); });
   const q = m.querySelector('#q'); q.oninput = debounce(() => { state.q = q.value; renderMain(); const nq = $('q'); nq.focus(); nq.setSelectionRange(nq.value.length, nq.value.length); }, 250);
   m.querySelectorAll('[data-ent]').forEach(s => s.onchange = () => Store.patchVendor(cid, s.dataset.ent, { e: s.value }));
+  m.querySelectorAll('[data-oc]').forEach(s => s.onchange = () => Store.patchVendor(cid, s.dataset.oc, { oc: s.value || null }));
   m.querySelectorAll('[data-cn]').forEach(i => i.onchange = () => Store.patchVendor(cid, i.dataset.cn, { cn: i.value.trim() }));
   m.querySelectorAll('[data-ce]').forEach(i => i.onchange = () => Store.patchVendor(cid, i.dataset.ce, { ce: i.value.trim() }));
   m.querySelectorAll('[data-w9toggle]').forEach(b => b.onclick = () => { const v = Store.vendors(cid)[b.dataset.w9toggle] || {};
@@ -384,10 +385,9 @@ function runImport() {
     for (const key in cos[co]) {
       const a = cos[co][key]; const fk = fieldKey(key); const o = old[fk] || {};
       out[fk] = { n: a.n, k: a.k, t: r2(a.t), x: r2(a.x), c: Object.fromEntries(Object.entries(a.c).map(([k, v]) => [k, r2(v)])), u: r2(a.u), ua: a.ua, nr: a.nr,
-        up: r2(a.up || 0), cash: a.cash || 0,
-        e: o.e || 'Unknown', cn: o.cn || '', ce: o.ce || '', w9: o.w9 || null, rq: o.rq || null, rs: o.rs || null };
+        e: o.e || 'Unknown', cn: o.cn || '', ce: o.ce || '', w9: o.w9 || null, rq: o.rq || null, oc: o.oc || null, rs: o.rs || null, up: a.up || 0, cash: a.cash || 0, pb: a.pb || 0 };
     }
-    for (const fk in old) if (fk.startsWith('v_') && !out[fk] && old[fk].w9 && old[fk].w9.on) out[fk] = { ...old[fk], t: 0, x: 0, c: {}, u: 0, ua: [], nr: [], up: 0, cash: 0 };
+    for (const fk in old) if (fk.startsWith('v_') && !out[fk] && old[fk].w9 && old[fk].w9.on) out[fk] = { ...old[fk], t: 0, x: 0, c: {}, u: 0, ua: [], nr: [], up: 0, cash: 0, pb: 0 };
     const prev = Store.clients()[cid] || {};
     const accountMap = { ...(prev.accountMap || {}) };
     imp.accounts.filter(a => a.co === co && a.cat).forEach(a => accountMap[a.acct + '|' + a.an] = a.cat);
